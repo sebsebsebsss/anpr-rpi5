@@ -1,0 +1,9 @@
+files/gate_anpr.env
+files/plate_allowlist.json
+ansible.env
+inventory.ini
+exports/
+.DS_Store
+.ansible/
+tmp/
+tests/Test\ Image.png
