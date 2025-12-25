@@ -83,6 +83,15 @@ set +a
 ANSIBLE_BECOME_PASSWORD="$ANSIBLE_BECOME_PASSWORD" ansible-playbook -i inventory.ini site.yml -e ansible_host="$GATEPI_HOST" -e ansible_user="$GATEPI_USER"
 ```
 
+## Optional OpenALPR smoketest
+If you have the test image locally, you can run a smoketest during the playbook:
+
+```sh
+ANSIBLE_BECOME_PASSWORD="$ANSIBLE_BECOME_PASSWORD" ansible-playbook -i inventory.ini site.yml -e ansible_host="$GATEPI_HOST" -e ansible_user="$GATEPI_USER" -e run_openalpr_smoketest=true
+```
+
+The smoketest requires `tests/Test Image.png` to exist locally. If it’s missing, the playbook will fail with a clear message.
+
 ## Logs
 - Service logs (systemd):
 

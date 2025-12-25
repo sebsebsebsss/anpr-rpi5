@@ -21,6 +21,7 @@
     openalpr_sysconfdir: /etc
     alprd_bin: /usr/local/bin/alprd
     alprd_stream: "{{ lookup('env', 'ALPRD_STREAM') | default('/dev/video0', true) }}"
+    run_openalpr_smoketest: false
 
     # OpenCV 3.x build (match old Pi stack)
     build_opencv3: false
@@ -325,6 +326,48 @@
       command: ldconfig
       when: build_openalpr_from_source
 
+    - name: Determine OpenALPR share directory
+      stat:
+        path: /usr/local/share/openalpr
+      register: openalpr_share_local
+
+    - name: Set OpenALPR share directory fact
+      set_fact:
+        openalpr_share_dir: "{{ '/usr/local/share/openalpr' if openalpr_share_local.stat.exists else '/usr/share/openalpr' }}"
+
+    - name: Check for local OpenALPR test image
+      stat:
+        path: tests/Test Image.png
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: openalpr_test_image
+
+    - name: Fail if smoketest requested but test image is missing
+      fail:
+        msg: "OpenALPR smoketest requested but tests/Test Image.png is missing."
+      when: run_openalpr_smoketest | bool and (not openalpr_test_image.stat.exists)
+
+    - name: Copy OpenALPR test image (if present)
+      copy:
+        src: tests/Test Image.png
+        dest: /tmp/openalpr_test.png
+        owner: root
+        group: root
+        mode: "0644"
+      when: openalpr_test_image.stat.exists
+
+    - name: Run OpenALPR smoketest (optional)
+      command: alpr -c eu -n 10 /tmp/openalpr_test.png
+      register: openalpr_smoketest
+      changed_when: false
+      when: run_openalpr_smoketest | bool and openalpr_test_image.stat.exists
+
+    - name: Fail if smoketest finds no plates
+      fail:
+        msg: "OpenALPR smoketest failed: no plates detected in tests/Test Image.png."
+      when: run_openalpr_smoketest | bool and ('No license plates found.' in openalpr_smoketest.stdout)
+
     # --- OpenALPR config files ---
     - name: Ensure OpenALPR config directory exists
       file:
@@ -357,8 +400,8 @@
         mode: "0644"
         content: |
           ; Use runtime/config copied from old Pi (apt layout)
-          config_file = /usr/share/openalpr/config/openalpr.defaults.conf
-          runtime_dir = /usr/share/openalpr/runtime_data
+          config_file = {{ openalpr_share_dir }}/config/openalpr.defaults.conf
+          runtime_dir = {{ openalpr_share_dir }}/runtime_data
           country = eu
           max_plate_width_percent = 30
           max_plate_height_percent = 30
