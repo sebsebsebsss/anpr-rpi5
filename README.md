@@ -4,9 +4,14 @@ Ansible playbook to provision the Gate ANPR stack on a Raspberry Pi5 (Bookworm).
 
 ## What it does
 - Builds and installs OpenALPR from source when needed.
-- Configures OpenALPR and runtime data paths.
-- Installs and runs the gate worker service (`gate_anpr`).
+- Configures OpenALPR and runtime data paths (GB plates).
+- Installs and runs services:
+  - `alprd` (OpenALPR daemon)
+  - `gate_anpr` (gate worker)
+  - `gate_anpr_web` (web UI)
+  - `gate_anpr_stream_jpeg` (RTSP -> JPEG stream)
 - Sets up logging to `/var/log/gate-anpr/gate-anpr.log`.
+- Adds a stream watchdog to auto-restart the JPEG stream when it stalls.
 
 ## Requirements
 - Ansible on your workstation.
@@ -28,7 +33,7 @@ cp files/gate_anpr.env.example files/gate_anpr.env
 PUSHOVER_USER_KEY=...
 PUSHOVER_APP_TOKEN=...
 GATE_ANPR_DEBUG=0
-PLATE_ALLOWLIST_PATH=/etc/gate_anpr_allowlist.json
+PLATE_ALLOWLIST_PATH=/opt/gate_anpr/allowlist.json
 # Optional inline fallback (used only if PLATE_ALLOWLIST_PATH is empty)
 PLATE_ALLOWLIST_JSON=[["A1ABC","Test Car"]]
 ```
@@ -62,7 +67,7 @@ cp ansible.env.example ansible.env
 GATEPI_HOST=192.168.x.x
 GATEPI_USER=pi
 ANSIBLE_BECOME_PASSWORD=...
-ALPRD_STREAM=/dev/video0
+ALPRD_STREAM=rtsp://user:pass@camera-ip:554/h264Preview_01_main
 ```
 
 ## Inventory
@@ -81,6 +86,20 @@ set -a
 source ansible.env
 set +a
 ANSIBLE_BECOME_PASSWORD="$ANSIBLE_BECOME_PASSWORD" ansible-playbook -i inventory.ini site.yml -e ansible_host="$GATEPI_HOST" -e ansible_user="$GATEPI_USER"
+```
+
+### Fast deploys (no provisioning)
+Use tags to avoid long runs when you only want app/web updates:
+
+```sh
+# Web UI only
+ansible-playbook -i inventory.ini -u pi site.yml --tags web
+
+# App/services only (no provisioning/build)
+ansible-playbook -i inventory.ini -u pi site.yml --tags deploy
+
+# Provision/build only
+ansible-playbook -i inventory.ini -u pi site.yml --tags provision
 ```
 
 ## Optional OpenALPR smoketest
@@ -108,6 +127,43 @@ tail -n100 /var/log/gate-anpr/gate-anpr.log
 ## Debug logging
 Set `GATE_ANPR_DEBUG=1` in `files/gate_anpr.env` and re-run the playbook.
 
+## Web UI
+A simple SPA is served from the Pi at port 80 by default:
+
+```
+http://<pi-ip>/
+```
+
+It lets you edit the allowlist, view recent events, browse recent images, and use a
+tablet-optimized homepage that keeps the live view, gate control, and latest
+recognitions on a single screen (tuned for iPad mini).
+
+You can override the port with `GATE_WEB_PORT` in `/etc/gate_anpr.env`.
+
+### iPad mini homepage
+- The homepage is the default route (`/`) so it can be pinned to the home screen.
+- Add to Home Screen in Safari for fullscreen mode.
+- Apple web app meta tags are included; `apple-touch-icon.png` is shipped in `files/web/static/`.
+
+## Hostname alias
+The playbook can publish an mDNS alias so you can reach the Pi at `gate.local`.
+Override with `GATEPI_ALIAS_HOSTNAME` (default `gate`) in your local env.
+
+## Live stream (web UI tab)
+The web UI shows the RTSP camera stream via a JPEG frame update (ffmpeg writing
+`/static/stream.jpg`).
+
+Configure in `/etc/gate_anpr.env` (or `files/gate_anpr.env` + re-run the playbook):
+
+```
+GATE_WEB_STREAM_URL=/static/stream.jpg
+GATE_WEB_STREAM_RTSP_URL=rtsp://user:pass@camera-ip:554/h264Preview_01_main
+GATE_WEB_STREAM_FPS=12.5
+GATE_WEB_STREAM_WIDTH=1280
+GATE_WEB_STREAM_HEIGHT=720
+```
+
+
 ## Synthetic test job (run on the Pi)
 The playbook installs a helper at `/opt/gate_anpr/tests/synthetic_job.py`:
 
@@ -130,3 +186,4 @@ ansible-playbook -i inventory.ini site.yml -e run_synthetic_job=true -e syntheti
 ## Notes
 - The test image for OpenALPR lives under `tests/`.
 - OpenALPR apt packages are not available on Bookworm, so the playbook builds from source.
+ - Tests are manual and rely on the local `tests/` assets.

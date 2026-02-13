@@ -7,3 +7,6 @@ exports/
 .ansible/
 tmp/
 tests/Test\ Image.png
+*.jpeg
+*.jpg
+*.png
