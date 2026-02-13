@@ -1498,13 +1498,8 @@ async function initStreamHealth() {
     try {
       const resp = await fetch("/api/stream-health");
       const data = await resp.json();
-      const isProxy = data.mode === "proxy";
       const issues = [];
       if (data.stream_stale) issues.push("stale");
-      if (isProxy) {
-        if (!data.video10 || !data.video10.ok) issues.push("v10");
-        if (!data.video11 || !data.video11.ok) issues.push("v11");
-      }
       if (!issues.length) {
         setState("OK", "ok");
         if (bannerEl) {

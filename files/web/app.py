@@ -953,22 +953,6 @@ def stream_lag():
     return jsonify({"lag_ms": int(lag_ms), "frame_mtime": mtime, "server_time": now})
 
 
-def _ffmpeg_process_lines():
-    try:
-        result = subprocess.run(
-            ["pgrep", "-fa", "ffmpeg"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=2,
-        )
-    except Exception:
-        return []
-    if result.returncode not in (0, 1):
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
-
-
 @app.route("/api/stream-health", methods=["GET"])
 def stream_health():
     stream_path = os.path.join(STATIC_DIR, "stream.jpg")
@@ -978,18 +962,6 @@ def stream_health():
     stream_age = now - stream_mtime if stream_mtime else None
     stream_stale = stream_age is None or stream_age > stale_seconds
 
-    device10 = os.getenv("ALPRD_V4L2_DEVICE", "/dev/video10")
-    device11 = os.getenv("ALPRD_V4L2_WEB_DEVICE", "/dev/video11")
-    lines = _ffmpeg_process_lines()
-    video10_writer = any(f"-f v4l2 {device10}" in line for line in lines)
-    video11_writer = any(f"-f v4l2 {device11}" in line for line in lines)
-    video11_reader = any(f"-i {device11}" in line for line in lines)
-    video10_ok = os.path.exists(device10) and video10_writer
-    video11_ok = os.path.exists(device11) and video11_writer and video11_reader
-    rtsp_v4l2_state = _systemctl_is_active("gate_anpr_rtsp_v4l2")
-    proxy_active = rtsp_v4l2_state == "active" or video10_writer or video11_writer
-    mode = "proxy" if proxy_active else "direct"
-
     return jsonify(
         {
             "now": now,
@@ -997,15 +969,7 @@ def stream_health():
             "stream_age_s": stream_age,
             "stream_stale": stream_stale,
             "stale_threshold_s": stale_seconds,
-            "mode": mode,
-            "video10": {"device": device10, "ok": video10_ok, "writer": video10_writer},
-            "video11": {
-                "device": device11,
-                "ok": video11_ok,
-                "writer": video11_writer,
-                "reader": video11_reader,
-            },
-            "ok": (not stream_stale) and (video10_ok and video11_ok if proxy_active else True),
+            "ok": not stream_stale,
         }
     )
 

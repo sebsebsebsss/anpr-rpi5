@@ -57,18 +57,6 @@
           msg: "ALPRD_STREAM must be set to an RTSP URL; refusing to use {{ alprd_stream | default('') }}"
         when: alprd_stream | length == 0 or alprd_stream is match('^/dev/')
   
-      - name: Remove Debian bullseye repo (cleanup OpenCV 3.x attempt)
-        file:
-          path: /etc/apt/sources.list.d/bullseye.list
-          state: absent
-        when: cleanup_opencv3 | bool
-  
-      - name: Remove bullseye cmake pin (cleanup OpenCV 3.x attempt)
-        file:
-          path: /etc/apt/preferences.d/cmake-bullseye
-          state: absent
-        when: cleanup_opencv3 | bool
-  
       - name: Remove OpenCV 3 build artifacts (cleanup OpenCV 3.x attempt)
         file:
           path: "{{ item }}"
@@ -157,31 +145,6 @@
         apt:
           update_cache: yes
           cache_valid_time: 3600
-  
-      - name: Remove OpenCV 4 packages (ensure clean OpenCV 3 build)
-        apt:
-          name:
-            - libopencv-dev
-            - libopencv-core-dev
-            - libopencv-imgproc-dev
-            - libopencv-highgui-dev
-            - libopencv-videoio-dev
-            - libopencv-calib3d-dev
-            - libopencv-features2d-dev
-            - libopencv-imgcodecs-dev
-            - libopencv-dnn-dev
-            - libopencv-objdetect-dev
-            - libopencv-ml-dev
-            - libopencv-photo-dev
-            - libopencv-shape-dev
-            - libopencv-stitching-dev
-            - libopencv-superres-dev
-            - libopencv-video-dev
-            - opencv-data
-            - python3-opencv
-          state: absent
-          purge: yes
-        when: build_opencv3 | bool
   
       - name: Remove OpenCV 4 local install leftovers
         file:
@@ -774,6 +737,17 @@
         hour: "3"
         day: "1"
         job: "find {{ plates_dir }} -type f -name '*.jpg' -mtime +180 -delete"
+      tags:
+        - deploy
+
+    - name: Install monthly system log purge cron (older than 180 days)
+      cron:
+        name: "Purge old system logs"
+        user: root
+        minute: "37"
+        hour: "3"
+        day: "1"
+        job: "journalctl --vacuum-time=180d >/dev/null 2>&1"
       tags:
         - deploy
 
