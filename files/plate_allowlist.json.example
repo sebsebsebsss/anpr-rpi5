@@ -1,3 +1,6 @@
 [
-  ["A1ABC", "Test Car"]
+  {
+    "owner": "Test Car",
+    "plates": ["A1ABC", "A1A8C"]
+  }
 ]

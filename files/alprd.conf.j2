@@ -3,8 +3,9 @@
 [daemon]
 
 stream = {{ alprd_stream }}
-;stream = webcam
-;stream = /dev/video0
+{% if alprd_roi | length > 0 %}
+roi = {{ alprd_roi }}
+{% endif %}
 
 country = gb
 site_id = gate
