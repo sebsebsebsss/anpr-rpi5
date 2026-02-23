@@ -35,6 +35,10 @@ const state = {
   themeLastFetch: 0,
 };
 
+const LEGACY_IOS =
+  /iP(ad|hone|od)/.test(navigator.userAgent || "") &&
+  /OS 12_/.test(navigator.userAgent || "");
+
 let GROUP_WINDOW_SEC = 60;
 let STREAM_REFRESH_MS = 200;
 
@@ -196,6 +200,24 @@ function getAgeMinutes(ts) {
   return Math.floor(diffMs / 60000);
 }
 
+function createLegacyStreamImage(url) {
+  const img = new Image();
+  img.alt = "Live stream";
+  img.className = "stream-image-single";
+  let timer = null;
+  const schedule = (delay) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(loadNext, delay);
+  };
+  const loadNext = () => {
+    const sep = url.includes("?") ? "&" : "?";
+    img.src = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
+    schedule(Math.max(100, STREAM_REFRESH_MS));
+  };
+  loadNext();
+  return img;
+}
+
 function createSmoothImageStream(url) {
   const stack = document.createElement("div");
   stack.className = "stream-image-stack";
@@ -213,6 +235,11 @@ function createSmoothImageStream(url) {
   let bufferUrl = "";
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const canFetchBlob =
+    typeof fetch === "function" &&
+    typeof URL !== "undefined" &&
+    typeof URL.createObjectURL === "function";
+  let useDirect = !canFetchBlob;
 
   const schedule = () => {
     if (timer) clearTimeout(timer);
@@ -255,27 +282,33 @@ function createSmoothImageStream(url) {
     const sep = url.includes("?") ? "&" : "?";
     const next = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
     try {
-      const resp = await fetch(next, { cache: "no-store" });
-      if (!resp.ok) {
-        throw new Error("fetch failed");
-      }
-      const blob = await resp.blob();
-      if (ctx && typeof createImageBitmap === "function") {
-        const bmp = await createImageBitmap(blob);
-        const isBlack = isMostlyBlack(bmp);
-        bmp.close();
-        if (isBlack) {
-          delayMs = Math.min(Math.round(delayMs * 1.2), 1000);
-          schedule();
-          return;
+      if (!useDirect) {
+        const resp = await fetch(next, { cache: "no-store" });
+        if (!resp.ok) {
+          throw new Error("fetch failed");
         }
+        const blob = await resp.blob();
+        if (ctx && typeof createImageBitmap === "function") {
+          const bmp = await createImageBitmap(blob);
+          const isBlack = isMostlyBlack(bmp);
+          bmp.close();
+          if (isBlack) {
+            delayMs = Math.min(Math.round(delayMs * 1.2), 1000);
+            schedule();
+            return;
+          }
+        }
+        if (bufferUrl) URL.revokeObjectURL(bufferUrl);
+        bufferUrl = URL.createObjectURL(blob);
+        buffer.src = bufferUrl;
+      } else {
+        buffer.src = next;
       }
-      if (bufferUrl) URL.revokeObjectURL(bufferUrl);
-      bufferUrl = URL.createObjectURL(blob);
       buffer.onload = () => {
-        display.src = bufferUrl;
+        const nextUrl = bufferUrl || buffer.src;
+        display.src = nextUrl;
         if (activeUrl) URL.revokeObjectURL(activeUrl);
-        activeUrl = bufferUrl;
+        activeUrl = bufferUrl || "";
         bufferUrl = "";
         buffer.onload = null;
         buffer.onerror = null;
@@ -288,8 +321,8 @@ function createSmoothImageStream(url) {
         delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
         schedule();
       };
-      buffer.src = bufferUrl;
     } catch (err) {
+      useDirect = true;
       delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
       schedule();
     } finally {
@@ -1239,6 +1272,13 @@ async function initTabletStream() {
       if (status) status.textContent = "RTSP not supported in browsers.";
       return;
     }
+    if (LEGACY_IOS) {
+      url = "/static/stream.jpg";
+      frame.innerHTML = "";
+      frame.appendChild(createLegacyStreamImage(url));
+      if (status) status.textContent = "Live";
+      return;
+    }
     const stack = createSmoothImageStream(url);
     frame.innerHTML = "";
     frame.appendChild(stack);
@@ -1330,6 +1370,21 @@ async function initStream() {
     let el = null;
     if (lower.startsWith("rtsp://")) {
       if (status) status.textContent = "RTSP is not supported in browsers.";
+      return;
+    }
+    if (LEGACY_IOS) {
+      url = "/static/stream.jpg";
+      el = createLegacyStreamImage(url);
+      frame.innerHTML = "";
+      if (fpsEl) {
+        frame.appendChild(fpsEl);
+      }
+      frame.appendChild(el);
+      if (status) status.textContent = "Live";
+      startStreamFps(el);
+      initStreamLag();
+      initStreamHealth();
+      initSystemHealth();
       return;
     }
     if (lower.endsWith(".m3u8") || lower.endsWith(".mp4") || lower.endsWith(".webm")) {

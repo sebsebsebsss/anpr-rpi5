@@ -26,6 +26,7 @@
     run_openalpr_smoketest: false
     alprd_cpu_affinity: "{{ lookup('env', 'ALPRD_CPU_AFFINITY') | default('', true) }}"
     alprd_roi: "{{ lookup('env', 'ALPRD_ROI') | default('', true) }}"
+    gate_anpr_env_path: "{{ playbook_dir }}/files/gate_anpr.env"
     gate_web_stream_url: "{{ lookup('env', 'GATE_WEB_STREAM_URL') | default('/static/stream.jpg', true) }}"
     gate_web_stream_rtsp_url: "{{ lookup('env', 'GATE_WEB_STREAM_RTSP_URL') | default(alprd_stream, true) }}"
     gate_web_stream_fps: "{{ lookup('env', 'GATE_WEB_STREAM_FPS') | default('5', true) }}"
@@ -850,7 +851,7 @@
 
     - name: Check for local gate_anpr env file
       stat:
-        path: files/gate_anpr.env
+        path: "{{ gate_anpr_env_path }}"
       delegate_to: localhost
       become: false
       run_once: true
@@ -858,9 +859,20 @@
       tags:
         - deploy
 
+    - name: Load gate_anpr env overrides for web stream
+      set_fact:
+        gate_web_stream_url: "{{ lookup('ini', 'GATE_WEB_STREAM_URL type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_url) }}"
+        gate_web_stream_rtsp_url: "{{ lookup('ini', 'GATE_WEB_STREAM_RTSP_URL type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_rtsp_url) }}"
+        gate_web_stream_fps: "{{ lookup('ini', 'GATE_WEB_STREAM_FPS type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_fps) }}"
+        gate_web_stream_width: "{{ lookup('ini', 'GATE_WEB_STREAM_WIDTH type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_width) }}"
+        gate_web_stream_height: "{{ lookup('ini', 'GATE_WEB_STREAM_HEIGHT type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_height) }}"
+      when: gate_anpr_env.stat.exists
+      tags:
+        - deploy
+
     - name: Install gate_anpr env file (if present)
       copy:
-        src: files/gate_anpr.env
+        src: "{{ gate_anpr_env_path }}"
         dest: /etc/gate_anpr.env
         owner: root
         group: root

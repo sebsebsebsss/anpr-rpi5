@@ -417,7 +417,7 @@ def consumer_main(client):
                                             data={
                                                 "token": PUSHOVER_APP_TOKEN,
                                                 "user": PUSHOVER_USER_KEY,
-                                                "message": "Pi5 - Opening Gate for %s" % number_plate,
+                                                "message": "Opening gate for %s" % number_plate,
                                             },
                                             files={
                                                 "attachment": ("car-reg.jpg", f, "image/jpeg")
