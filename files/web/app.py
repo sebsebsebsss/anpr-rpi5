@@ -587,6 +587,15 @@ def get_gate_cooldown():
     return jsonify({"remaining": _gate_cooldown_remaining_locked()})
 
 
+@app.route("/api/gate-last-open", methods=["GET"])
+def get_gate_last_open():
+    last_ts = _read_last_open_time()
+    if last_ts <= 0:
+        return jsonify({"last_open_ts": None, "last_open_iso": None})
+    last_iso = datetime.fromtimestamp(last_ts).isoformat()
+    return jsonify({"last_open_ts": last_ts, "last_open_iso": last_iso})
+
+
 @app.route("/api/events", methods=["GET"])
 def get_events():
     limit = int(request.args.get("limit", "200"))
