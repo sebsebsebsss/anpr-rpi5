@@ -93,9 +93,9 @@ if not list_of_plates:
 
 # NOTE: you had GPIO.BOARD with gatePin=23 in the original.
 # That is internally inconsistent with the comment, but it "works" in your current setup.
-# Keeping it unchanged to avoid breaking wiring assumptions.
-gatePin = 23  # (legacy) used with GPIO.BOARD in original script
-gatePin_bcm = 11  # BOARD 23 maps to BCM 11 on Raspberry Pi
+# Keeping the same defaults while allowing overrides via env.
+gatePin = int(os.getenv("GATE_PIN_BOARD", "23"))  # legacy BOARD numbering
+gatePin_bcm = int(os.getenv("GATE_PIN_BCM", "11"))  # BOARD 23 maps to BCM 11 on Raspberry Pi
 
 PUSHOVER_ENABLED = bool(PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN)
 if not PUSHOVER_ENABLED:

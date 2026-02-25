@@ -1,22 +1,44 @@
-# gatepi-ansible
+# gatepi-anpr
 
-Ansible playbook to provision the Gate ANPR stack on a Raspberry Pi5 (Bookworm).
+All-in-one Raspberry Pi 5 gate controller with number plate recognition.
+Provisioned by a single Ansible playbook, it reads an RTSP camera stream, opens your
+gate automatically for allowlisted plates, and provides a fast LAN-hosted web UI
+for live view, manual control, history, and diagnostics.
+
+![Gatepi ANPR UI](docs/UI.png)
+
+## Highlights
+- One-command provisioning for a fresh Raspberry Pi 5 (Bookworm).
+- Automatic gate opening for recognised plates with optional fuzzy matching.
+- LAN-first web UI designed for low power tablets.
+- Manual gate control and cooldown safety.
+- Live camera view from RTSP with auto-restart watchdog.
+- Candidates/history, timeline, stats, and service logs.
+- Built-in data retention: image purge + DB cleanup.
 
 ## What it does
 - Builds and installs OpenALPR from source when needed.
-- Configures OpenALPR and runtime data paths (GB plates).
+- Configures OpenALPR for GB plates and runtime paths.
 - Installs and runs services:
   - `alprd` (OpenALPR daemon)
-  - `gate_anpr` (gate worker)
+  - `gate_anpr` (gate worker + GPIO)
   - `gate_anpr_web` (web UI)
   - `gate_anpr_stream_jpeg` (RTSP -> JPEG stream)
 - Sets up logging to `/var/log/gate-anpr/gate-anpr.log`.
 - Adds a stream watchdog to auto-restart the JPEG stream when it stalls.
+- Purges old plate images and stale events records on a schedule.
 
-## Requirements
-- Ansible on your workstation.
-- SSH access to the Pi user (default `pi`).
+## Hardware Requirements
+ - A Gate/Garage door controller which allows for a relay to toggle an open event - the pi is an accessory for your main gate controller, not a replacement for it 
+ - A Raspberry Pi - This was developed on an RPi5 8GB, but had a previous version running on a Pi4 4GB without issue for a couple of years.  It's not very RAM hungry to may work on a 2GB model too
+ - A Relay board - I'm using the now discontinued ModMyPi PiOT Relay Board, but there's nothing special about this board and any modern Relay board should do - you will have to adjust the pin to suit your setup
+ - An IP camera on your network exposing an RTSP stream - after extensive testing I settled on a Annke CZ804, but have had success with Foscams before too.  Note a bullet camera with IR sensors and a configurable shutter speed and focus work best.
+
+# Software Requirements
+- Ansible on your local machine.
+- SSH access to the Pi (I used default user `pi`).
 - The Pi reachable on your LAN.
+
 
 ## Configure secrets
 Pushover credentials live in a local env file (gitignored).
@@ -36,6 +58,8 @@ GATE_ANPR_DEBUG=0
 PLATE_ALLOWLIST_PATH=/opt/gate_anpr/allowlist.json
 # Optional inline fallback (used only if PLATE_ALLOWLIST_PATH is empty)
 PLATE_ALLOWLIST_JSON=[["A1ABC","Test Car"]]
+GATE_PIN_BOARD=23
+GATE_PIN_BCM=11
 ```
 
 3) Create the allowlist file:
@@ -128,15 +152,15 @@ tail -n100 /var/log/gate-anpr/gate-anpr.log
 Set `GATE_ANPR_DEBUG=1` in `files/gate_anpr.env` and re-run the playbook.
 
 ## Web UI
-A simple SPA is served from the Pi at port 80 by default:
+A fast SPA is served from the Pi at port 80 by default:
 
 ```
 http://<pi-ip>/
 ```
 
-It lets you edit the allowlist, view recent events, browse recent images, and use a
-tablet-optimized homepage that keeps the live view, gate control, and latest
-recognitions on a single screen (tuned for iPad mini).
+It lets you edit the allowlist, view recent events, browse captures, check logs,
+and use a tablet-optimised homepage that keeps live view, gate control, and latest
+recognitions on one screen (tuned for iPad mini).
 
 You can override the port with `GATE_WEB_PORT` in `/etc/gate_anpr.env`.
 
