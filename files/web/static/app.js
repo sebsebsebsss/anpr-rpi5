@@ -709,7 +709,9 @@ function renderEvents() {
     }
 
     const bestImage = pickBestImage(group.images);
-    const heroImage = bestImage ? bestImage.url : group.images[0]?.url;
+    const heroImage = bestImage
+      ? bestImage.url
+      : (group.images[0] ? group.images[0].url : null);
     if (heroImage) {
       const imageWrap = document.createElement("div");
       imageWrap.className = "event-image-wrap";
