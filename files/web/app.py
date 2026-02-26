@@ -1104,6 +1104,10 @@ def index():
 def admin():
     return send_from_directory(STATIC_DIR, "admin.html")
 
+@app.route("/fullscreen")
+def fullscreen():
+    return send_from_directory(STATIC_DIR, "fullscreen.html")
+
 
 @app.route("/stats")
 def stats():

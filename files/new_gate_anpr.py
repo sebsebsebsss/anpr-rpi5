@@ -467,15 +467,18 @@ def consumer_main(client):
                     last_unmatched = last_seen_unmatched.get(top_plate, 0)
                     if now > (last_unmatched + UNMATCHED_DEDUP_SECONDS):
                         last_seen_unmatched[top_plate] = now
+                        owner = allowlist_map.get(top_plate, "")
+                        is_known = bool(owner)
+                        event_kind = "recognised" if is_known else "unmatched"
                         _record_event(
                             uuid=uuid,
                             plate=top_plate,
-                            owner=allowlist_map.get(top_plate, ""),
-                            allowed=False,
+                            owner=owner,
+                            allowed=is_known,
                             confidence=candidates[0].get("confidence")
                             if candidates
                             else None,
-                            kind="unmatched",
+                            kind=event_kind,
                             image_name=image_name,
                             captured_at=captured_at,
                             processing_time_ms=processing_time_ms,
@@ -487,9 +490,11 @@ def consumer_main(client):
                             fuzzy=0,
                         )
                         log.info(
-                            "Recorded event kind=unmatched plate=%s confidence=%s allowed=false",
+                            "Recorded event kind=%s plate=%s confidence=%s allowed=%s",
+                            event_kind,
                             top_plate,
                             candidates[0].get("confidence") if candidates else None,
+                            is_known,
                         )
             else:
                 log.debug("Plate result too old; skipping (min_time=%s)", min_time)

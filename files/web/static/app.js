@@ -47,6 +47,14 @@ function normalizeKind(kind) {
   return kind === "candidate" ? "unmatched" : kind;
 }
 
+function normalizeEventKind(event) {
+  const base = normalizeKind(event.kind);
+  if (base === "unmatched" && event.owner) {
+    return "recognised";
+  }
+  return base;
+}
+
 function setStatus(msg) {
   if (!statusEl) return;
   statusEl.textContent = msg;
@@ -456,7 +464,7 @@ function groupEventsByWindow(events) {
       };
       groups.set(key, group);
     }
-    group.events.push({ ...event, kind: normalizeKind(event.kind) });
+    group.events.push({ ...event, kind: normalizeEventKind(event) });
     if (event.id !== undefined && event.id !== null) {
       group.eventIds.push(String(event.id));
     }
@@ -616,9 +624,10 @@ function renderEvents() {
     const summary = document.createElement("div");
     summary.className = "event-summary";
     const when = group.captured_at ? formatRelative(group.captured_at) : "--";
+    const whenAbs = group.captured_at ? formatDayTimeLabel(group.captured_at) : "--";
     const frames = group.images.length || 0;
     summary.innerHTML = `
-      <div class="meta">${when} • ${group.events.length} reads • ${frames} frame${
+      <div class="meta">${whenAbs} • ${when} • ${group.events.length} reads • ${frames} frame${
         frames === 1 ? "" : "s"
       } • ${processingLabel}</div>
       <div class="event-kinds">
@@ -1445,11 +1454,13 @@ function renderTabletTimeline() {
         <span>${rel}</span>
       </div>
     `;
-    if (event.id !== undefined && event.id !== null) {
-      row.classList.add("clickable");
-      row.addEventListener("click", () => {
-        jumpToEvent(String(event.id));
-      });
+    if (!document.body.classList.contains("fullscreen-page")) {
+      if (event.id !== undefined && event.id !== null) {
+        row.classList.add("clickable");
+        row.addEventListener("click", () => {
+          jumpToEvent(String(event.id));
+        });
+      }
     }
     list.appendChild(row);
   });
