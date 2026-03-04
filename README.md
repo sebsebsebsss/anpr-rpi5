@@ -34,10 +34,15 @@ for live view, manual control, history, and diagnostics.
  - A Relay board - I'm using the now discontinued ModMyPi PiOT Relay Board, but there's nothing special about this board and any modern Relay board should do - you will have to adjust the pin to suit your setup
  - An IP camera on your network exposing an RTSP stream - after extensive testing I settled on a Annke CZ804, but have had success with Foscams before too.  Note a bullet camera with IR sensors and a configurable shutter speed and focus work best.
 
-# Software Requirements
+## Software Requirements
 - Ansible on your local machine.
 - SSH access to the Pi (I used default user `pi`).
 - The Pi reachable on your LAN.
+
+## Future to do list
+- Get away from the legacy OpenALPR as its chewing through CPU
+  - a more modern architecture would allow for hardware offloading or using a TPU
+- Facial Recognition?
 
 
 ## Configure secrets
@@ -164,10 +169,6 @@ recognitions on one screen (tuned for iPad mini).
 
 You can override the port with `GATE_WEB_PORT` in `/etc/gate_anpr.env`.
 
-### iPad mini homepage
-- The homepage is the default route (`/`) so it can be pinned to the home screen.
-- Add to Home Screen in Safari for fullscreen mode.
-- Apple web app meta tags are included; `apple-touch-icon.png` is shipped in `files/web/static/`.
 
 ## Hostname alias
 The playbook can publish an mDNS alias so you can reach the Pi at `gate.local`.
