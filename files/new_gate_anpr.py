@@ -93,9 +93,9 @@ if not list_of_plates:
 
 # NOTE: you had GPIO.BOARD with gatePin=23 in the original.
 # That is internally inconsistent with the comment, but it "works" in your current setup.
-# Keeping it unchanged to avoid breaking wiring assumptions.
-gatePin = 23  # (legacy) used with GPIO.BOARD in original script
-gatePin_bcm = 11  # BOARD 23 maps to BCM 11 on Raspberry Pi
+# Keeping the same defaults while allowing overrides via env.
+gatePin = int(os.getenv("GATE_PIN_BOARD", "23"))  # legacy BOARD numbering
+gatePin_bcm = int(os.getenv("GATE_PIN_BCM", "11"))  # BOARD 23 maps to BCM 11 on Raspberry Pi
 
 PUSHOVER_ENABLED = bool(PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN)
 if not PUSHOVER_ENABLED:
@@ -417,7 +417,7 @@ def consumer_main(client):
                                             data={
                                                 "token": PUSHOVER_APP_TOKEN,
                                                 "user": PUSHOVER_USER_KEY,
-                                                "message": "Pi5 - Opening Gate for %s" % number_plate,
+                                                "message": "Opening gate for %s" % number_plate,
                                             },
                                             files={
                                                 "attachment": ("car-reg.jpg", f, "image/jpeg")
@@ -467,15 +467,18 @@ def consumer_main(client):
                     last_unmatched = last_seen_unmatched.get(top_plate, 0)
                     if now > (last_unmatched + UNMATCHED_DEDUP_SECONDS):
                         last_seen_unmatched[top_plate] = now
+                        owner = allowlist_map.get(top_plate, "")
+                        is_known = bool(owner)
+                        event_kind = "recognised" if is_known else "unmatched"
                         _record_event(
                             uuid=uuid,
                             plate=top_plate,
-                            owner=allowlist_map.get(top_plate, ""),
-                            allowed=False,
+                            owner=owner,
+                            allowed=is_known,
                             confidence=candidates[0].get("confidence")
                             if candidates
                             else None,
-                            kind="unmatched",
+                            kind=event_kind,
                             image_name=image_name,
                             captured_at=captured_at,
                             processing_time_ms=processing_time_ms,
@@ -487,9 +490,11 @@ def consumer_main(client):
                             fuzzy=0,
                         )
                         log.info(
-                            "Recorded event kind=unmatched plate=%s confidence=%s allowed=false",
+                            "Recorded event kind=%s plate=%s confidence=%s allowed=%s",
+                            event_kind,
                             top_plate,
                             candidates[0].get("confidence") if candidates else None,
+                            is_known,
                         )
             else:
                 log.debug("Plate result too old; skipping (min_time=%s)", min_time)

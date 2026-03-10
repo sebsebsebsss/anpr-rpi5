@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Gate ANPR" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Gate ANPR Fullscreen</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="main-page fullscreen-page">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="brand tab brand-tab" data-tab="home" aria-label="Gate ANPR home">
+          Gate ANPR 🚪
+        </button>
+        <nav class="tabs" role="tablist">
+          <button class="tab" data-tab="candidates" role="tab" aria-selected="false">
+            Candidates
+          </button>
+          <button class="tab" data-tab="timeline" role="tab" aria-selected="false">
+            Timeline
+          </button>
+          <button class="tab" data-tab="stream" role="tab" aria-selected="false">
+            Live
+          </button>
+          <button class="tab" data-tab="stats" role="tab" aria-selected="false">
+            Stats
+          </button>
+          <button class="tab" data-tab="logs" role="tab" aria-selected="false">
+            Logs
+          </button>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <div class="status status-chip" id="status">Idle</div>
+        <a class="admin-link" href="/admin" aria-label="Admin settings" title="Admin settings">
+          ⚙️
+        </a>
+      </div>
+    </header>
+
+    <main class="page">
+      <section id="tab-home" class="tab-panel active" role="tabpanel" aria-hidden="false">
+        <div class="tablet-grid">
+          <div class="card tablet-stream">
+            <div class="card-head">
+              <h2>Live view</h2>
+              <div class="stream-head-right">
+                <div class="live-badge" aria-live="polite">
+                  <span class="dot dot-live"></span>
+                  Live
+                </div>
+              </div>
+            </div>
+            <div class="tablet-stream-frame" id="tablet-stream-frame"></div>
+          </div>
+
+          <div class="card tablet-gate">
+            <div class="card-head">
+              <h2>Gate control</h2>
+            </div>
+            <button id="open-gate-tablet" class="gate-button">Open the gate</button>
+            <div id="tablet-gate-status" class="gate-status gate-status--ready">
+              Gate ready
+            </div>
+            <div id="tablet-cooldown" class="gate-last">Opening the gate: --</div>
+          </div>
+
+          <div class="card tablet-timeline">
+            <div class="card-head">
+              <h2>Latest recognised</h2>
+              <div class="legend">Last 2 detections</div>
+            </div>
+            <div id="tablet-timeline-list" class="tablet-timeline-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-candidates" class="tab-panel" role="tabpanel" aria-hidden="true">
+        <div class="card">
+          <div class="card-head">
+            <h2>Latest capture</h2>
+            <button id="latest-jump" class="btn btn-ghost">View in history</button>
+          </div>
+          <div id="latest-image" class="latest-image"></div>
+          <div id="latest-event" class="latest-event"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Full History</h2>
+            <div class="filters">
+              <button class="chip active" data-kind="recognised">Recognised</button>
+              <button class="chip" data-kind="unmatched">Unmatched</button>
+            </div>
+          </div>
+          <p class="legend">
+            Recognised = allowlist match. Unmatched = capture with no allowlist hit.
+            Events are grouped into 60s
+            windows so a single vehicle shows together.
+          </p>
+          <div id="events-list" class="feed"></div>
+          <div id="events-more" class="feed-status">Scroll for more</div>
+        </div>
+      </section>
+
+      <section id="tab-stream" class="tab-panel" role="tabpanel" aria-hidden="true">
+        <div class="card stream-card">
+          <div class="card-head">
+            <div>
+              <h2>Live stream</h2>
+              <div class="stream-status" id="stream-status">Waiting for source…</div>
+              <div class="stream-health" id="stream-health">Health: --</div>
+              <div class="stream-banner" id="stream-banner" hidden>Stream stale</div>
+              <div class="stream-system" id="stream-system">System: --</div>
+            </div>
+            <div class="card-actions">
+              <button id="stream-reload" class="btn btn-secondary">Reload</button>
+              <button id="stream-clear" class="btn btn-secondary">Clear</button>
+            </div>
+          </div>
+          <div id="stream-frame" class="stream-frame"></div>
+        </div>
+      </section>
+
+      <section id="tab-timeline" class="tab-panel" role="tabpanel" aria-hidden="true">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>Timeline</h2>
+              <p class="legend">Recognised plates only, newest first. Compact view for quick scans.</p>
+            </div>
+            <div class="filters">
+              <button class="chip" data-window="7d">Last 7 days</button>
+              <button class="chip active" data-window="30d">30 days</button>
+              <button class="chip" data-window="all">Forever</button>
+            </div>
+          </div>
+          <div id="timeline-list" class="timeline-list"></div>
+          <div id="timeline-more" class="feed-status">Scroll for more</div>
+        </div>
+      </section>
+
+      <section id="tab-stats" class="tab-panel" role="tabpanel" aria-hidden="true">
+        <div class="card stats-card">
+          <div class="card-head">
+            <h2>Summary</h2>
+            <div class="filters">
+              <button class="chip active" data-window="24h">24h</button>
+              <button class="chip" data-window="7d">7 days</button>
+              <button class="chip" data-window="30d">30 days</button>
+              <button class="chip" data-window="all">Forever</button>
+            </div>
+          </div>
+          <div class="stats-grid" id="stats-summary"></div>
+        </div>
+
+        <div class="card stats-card">
+          <div class="card-head">
+            <h2>Insights</h2>
+            <div class="legend" id="stats-window-label">Window: 24h</div>
+          </div>
+          <div class="stats-grid stats-grid--tight" id="stats-insights"></div>
+        </div>
+
+        <div class="card stats-card">
+          <div class="card-head">
+            <h2>Activity</h2>
+            <div class="legend" id="stats-series-empty">No data yet.</div>
+          </div>
+          <canvas id="stats-chart" height="220"></canvas>
+        </div>
+      </section>
+
+      <section id="tab-logs" class="tab-panel" role="tabpanel" aria-hidden="true">
+        <div class="card logs-card">
+          <div class="card-head">
+            <div>
+              <h2>Service logs</h2>
+            </div>
+            <div class="log-controls">
+              <label>
+                <span>Service</span>
+                <select id="logs-service">
+                  <option value="alprd">ALPR daemon</option>
+                  <option value="gate_anpr">Gate ANPR worker</option>
+                  <option value="gate_anpr_stream_jpeg">Web UI stream</option>
+                  <option value="gate_anpr_watchdog">Stream watchdog</option>
+                  <option value="system">System</option>
+                </select>
+              </label>
+              <label>
+                <span>Range</span>
+                <select id="logs-range">
+                  <option value="1h">Last 1 hour</option>
+                  <option value="6h" selected>Last 6 hours</option>
+                  <option value="12h">Last 12 hours</option>
+                  <option value="24h">Last 24 hours</option>
+                  <option value="7d">Last 7 days</option>
+                </select>
+              </label>
+              <label class="log-filter">
+                <span>Filter</span>
+                <input id="logs-filter" type="text" placeholder="error, rtsp, timeout" />
+              </label>
+              <label class="log-toggle">
+                <input id="logs-warn-only" type="checkbox" />
+                <span>Warnings only</span>
+              </label>
+              <label class="log-toggle">
+                <input id="logs-hide-access" type="checkbox" checked />
+                <span>Hide access logs</span>
+              </label>
+              <label class="log-toggle">
+                <input id="logs-hide-deprecations" type="checkbox" checked />
+                <span>Hide deprecations</span>
+              </label>
+              <label class="log-toggle">
+                <input id="logs-wrap" type="checkbox" checked />
+                <span>Wrap lines</span>
+              </label>
+              <button id="logs-refresh" class="btn btn-secondary">Refresh</button>
+            </div>
+          </div>
+          <div class="logs-meta" id="logs-meta">Updated --</div>
+          <div id="logs-container" class="logs-container"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

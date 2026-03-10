@@ -33,13 +33,26 @@ const state = {
   themeMode: "light",
   themeSun: null,
   themeLastFetch: 0,
+  lastGateOpenTs: null,
 };
+
+const LEGACY_IOS =
+  /iP(ad|hone|od)/.test(navigator.userAgent || "") &&
+  /OS 12_/.test(navigator.userAgent || "");
 
 let GROUP_WINDOW_SEC = 60;
 let STREAM_REFRESH_MS = 200;
 
 function normalizeKind(kind) {
   return kind === "candidate" ? "unmatched" : kind;
+}
+
+function normalizeEventKind(event) {
+  const base = normalizeKind(event.kind);
+  if (base === "unmatched" && event.owner) {
+    return "recognised";
+  }
+  return base;
 }
 
 function setStatus(msg) {
@@ -196,6 +209,24 @@ function getAgeMinutes(ts) {
   return Math.floor(diffMs / 60000);
 }
 
+function createLegacyStreamImage(url) {
+  const img = new Image();
+  img.alt = "Live stream";
+  img.className = "stream-image-single";
+  let timer = null;
+  const schedule = (delay) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(loadNext, delay);
+  };
+  const loadNext = () => {
+    const sep = url.includes("?") ? "&" : "?";
+    img.src = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
+    schedule(Math.max(100, STREAM_REFRESH_MS));
+  };
+  loadNext();
+  return img;
+}
+
 function createSmoothImageStream(url) {
   const stack = document.createElement("div");
   stack.className = "stream-image-stack";
@@ -213,6 +244,11 @@ function createSmoothImageStream(url) {
   let bufferUrl = "";
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const canFetchBlob =
+    typeof fetch === "function" &&
+    typeof URL !== "undefined" &&
+    typeof URL.createObjectURL === "function";
+  let useDirect = !canFetchBlob;
 
   const schedule = () => {
     if (timer) clearTimeout(timer);
@@ -255,27 +291,33 @@ function createSmoothImageStream(url) {
     const sep = url.includes("?") ? "&" : "?";
     const next = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
     try {
-      const resp = await fetch(next, { cache: "no-store" });
-      if (!resp.ok) {
-        throw new Error("fetch failed");
-      }
-      const blob = await resp.blob();
-      if (ctx && typeof createImageBitmap === "function") {
-        const bmp = await createImageBitmap(blob);
-        const isBlack = isMostlyBlack(bmp);
-        bmp.close();
-        if (isBlack) {
-          delayMs = Math.min(Math.round(delayMs * 1.2), 1000);
-          schedule();
-          return;
+      if (!useDirect) {
+        const resp = await fetch(next, { cache: "no-store" });
+        if (!resp.ok) {
+          throw new Error("fetch failed");
         }
+        const blob = await resp.blob();
+        if (ctx && typeof createImageBitmap === "function") {
+          const bmp = await createImageBitmap(blob);
+          const isBlack = isMostlyBlack(bmp);
+          bmp.close();
+          if (isBlack) {
+            delayMs = Math.min(Math.round(delayMs * 1.2), 1000);
+            schedule();
+            return;
+          }
+        }
+        if (bufferUrl) URL.revokeObjectURL(bufferUrl);
+        bufferUrl = URL.createObjectURL(blob);
+        buffer.src = bufferUrl;
+      } else {
+        buffer.src = next;
       }
-      if (bufferUrl) URL.revokeObjectURL(bufferUrl);
-      bufferUrl = URL.createObjectURL(blob);
       buffer.onload = () => {
-        display.src = bufferUrl;
+        const nextUrl = bufferUrl || buffer.src;
+        display.src = nextUrl;
         if (activeUrl) URL.revokeObjectURL(activeUrl);
-        activeUrl = bufferUrl;
+        activeUrl = bufferUrl || "";
         bufferUrl = "";
         buffer.onload = null;
         buffer.onerror = null;
@@ -288,8 +330,8 @@ function createSmoothImageStream(url) {
         delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
         schedule();
       };
-      buffer.src = bufferUrl;
     } catch (err) {
+      useDirect = true;
       delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
       schedule();
     } finally {
@@ -418,14 +460,27 @@ function groupEventsByWindow(events) {
         captured_at: event.captured_at,
         epoch,
         images: [],
+        eventIds: [],
       };
       groups.set(key, group);
     }
-    group.events.push({ ...event, kind: normalizeKind(event.kind) });
+    group.events.push({ ...event, kind: normalizeEventKind(event) });
+    if (event.id !== undefined && event.id !== null) {
+      group.eventIds.push(String(event.id));
+    }
     if (event.image_url) {
-      const exists = group.images.some((img) => img.url === event.image_url);
-      if (!exists) {
-        group.images.push({ url: event.image_url, name: event.image_name });
+      const existing = group.images.find((img) => img.url === event.image_url);
+      const conf = Number.isFinite(event.confidence) ? event.confidence : null;
+      if (existing) {
+        if (conf !== null && (existing.confidence === null || conf > existing.confidence)) {
+          existing.confidence = conf;
+        }
+      } else {
+        group.images.push({
+          url: event.image_url,
+          name: event.image_name,
+          confidence: conf,
+        });
       }
     }
     if (epoch !== null && (!group.epoch || epoch > group.epoch)) {
@@ -464,6 +519,15 @@ function pickBestEvent(events, best) {
   return chosen;
 }
 
+function pickBestImage(images) {
+  if (!images.length) return null;
+  return [...images].sort((a, b) => {
+    const aConf = Number.isFinite(a.confidence) ? a.confidence : -1;
+    const bConf = Number.isFinite(b.confidence) ? b.confidence : -1;
+    return bConf - aConf;
+  })[0];
+}
+
 function summarizeGroup(events) {
   const combined = new Map();
   events.forEach((event) => {
@@ -496,7 +560,7 @@ function summarizeGroup(events) {
   });
 }
 
-function renderFrameStrip(images, heroImg) {
+function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
   if (!images.length) return null;
   const strip = document.createElement("div");
   strip.className = "frame-strip";
@@ -504,9 +568,16 @@ function renderFrameStrip(images, heroImg) {
     const thumb = document.createElement("img");
     thumb.src = img.url;
     thumb.alt = "frame";
-    thumb.className = idx === 0 ? "active" : "";
+    thumb.className = idx === activeIndex ? "active" : "";
+    if (Number.isFinite(img.confidence)) {
+      thumb.title = `Conf: ${img.confidence.toFixed(2)}`;
+    }
     thumb.addEventListener("click", () => {
       heroImg.src = img.url;
+      if (confEl) {
+        const nextConf = Number.isFinite(img.confidence) ? img.confidence.toFixed(2) : "--";
+        confEl.textContent = `Conf: ${nextConf}`;
+      }
       strip.querySelectorAll("img").forEach((node) => node.classList.remove("active"));
       thumb.classList.add("active");
     });
@@ -528,6 +599,9 @@ function renderEvents() {
     const card = document.createElement("div");
     const hasAllowed = group.events.some((event) => event.allowed);
     card.className = `event-card event-group ${hasAllowed ? "allowed" : ""}`;
+    if (group.eventIds && group.eventIds.length) {
+      card.dataset.eventIds = group.eventIds.join(",");
+    }
     if (index === 0 && state.events.length) {
       card.id = "event-latest";
     }
@@ -550,9 +624,10 @@ function renderEvents() {
     const summary = document.createElement("div");
     summary.className = "event-summary";
     const when = group.captured_at ? formatRelative(group.captured_at) : "--";
+    const whenAbs = group.captured_at ? formatDayTimeLabel(group.captured_at) : "--";
     const frames = group.images.length || 0;
     summary.innerHTML = `
-      <div class="meta">${when} • ${group.events.length} reads • ${frames} frame${
+      <div class="meta">${whenAbs} • ${when} • ${group.events.length} reads • ${frames} frame${
         frames === 1 ? "" : "s"
       } • ${processingLabel}</div>
       <div class="event-kinds">
@@ -561,6 +636,13 @@ function renderEvents() {
       </div>
     `;
     card.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "event-body";
+    const left = document.createElement("div");
+    left.className = "event-body-left";
+    const right = document.createElement("div");
+    right.className = "event-body-right";
 
     const entries = summarizeGroup(group.events);
     const best = pickBestEntry(entries);
@@ -593,13 +675,13 @@ function renderEvents() {
         ${observedLine}
       `;
     }
-    card.appendChild(header);
+    left.appendChild(header);
 
     const altWrap = document.createElement("div");
-    altWrap.className = "alt-plates";
+    altWrap.className = "alt-plates open";
     const plateLines = document.createElement("div");
     plateLines.className = "plate-lines";
-    entries.forEach((entry) => {
+    entries.forEach((entry, entryIdx) => {
       if (best && entry.plate === best.plate && entry.kind === best.kind) return;
       const line = document.createElement("div");
       line.className = `plate-line ${entry.kind}`;
@@ -611,54 +693,66 @@ function renderEvents() {
         <div class="plate">${entry.plate}</div>
         <div class="meta">${entry.kind}${count} • ${conf} ${entry.owner ? `• ${entry.owner}` : ""}</div>
       `;
+      if (entryIdx >= 3) {
+        line.classList.add("alt-extra");
+      }
       plateLines.appendChild(line);
     });
     altWrap.appendChild(plateLines);
     const altCount = entries.length - (best ? 1 : 0);
     if (altCount > 0) {
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "alt-toggle";
-      toggle.textContent = `Show alternates (${altCount})`;
-      toggle.addEventListener("click", () => {
-        const open = altWrap.classList.toggle("open");
-        toggle.textContent = open ? "Hide alternates" : `Show alternates (${altCount})`;
-      });
-      card.appendChild(toggle);
-      card.appendChild(altWrap);
+      left.appendChild(altWrap);
+      if (altCount > 3) {
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "alt-toggle";
+        toggle.textContent = `Show more alternates (${altCount - 3})`;
+        toggle.addEventListener("click", () => {
+          const open = altWrap.classList.toggle("open");
+          toggle.textContent = open
+            ? "Hide alternates"
+            : `Show more alternates (${altCount - 3})`;
+        });
+        left.appendChild(toggle);
+      }
     }
 
-    const firstImage = group.images[0];
-    const heroImage = firstImage ? firstImage.url : null;
+    const bestImage = pickBestImage(group.images);
+    const heroImage = bestImage
+      ? bestImage.url
+      : (group.images[0] ? group.images[0].url : null);
     if (heroImage) {
+      const imageWrap = document.createElement("div");
+      imageWrap.className = "event-image-wrap";
       const img = document.createElement("img");
+      img.className = "event-image";
       img.src = heroImage;
       img.alt = "capture";
-      card.appendChild(img);
+      imageWrap.appendChild(img);
+      const conf = document.createElement("div");
+      conf.className = "event-image-conf";
+      const startConf =
+        bestImage && Number.isFinite(bestImage.confidence)
+          ? bestImage.confidence.toFixed(2)
+          : "--";
+      conf.textContent = `Conf: ${startConf}`;
+      imageWrap.appendChild(conf);
+      right.appendChild(imageWrap);
       if (group.images.length > 1) {
         const actions = document.createElement("div");
         actions.className = "frame-actions";
-        const nextBtn = document.createElement("button");
-        nextBtn.type = "button";
-        nextBtn.className = "frame-next";
-        nextBtn.textContent = "Next frame";
-        let idx = 0;
-        nextBtn.addEventListener("click", () => {
-          idx = (idx + 1) % group.images.length;
-          img.src = group.images[idx].url;
-          const strip = actions.querySelector(".frame-strip");
-          if (strip) {
-            strip.querySelectorAll("img").forEach((node, i) => {
-              node.classList.toggle("active", i === idx);
-            });
-          }
-        });
-        const strip = renderFrameStrip(group.images, img);
+        let idx = Math.max(
+          0,
+          group.images.findIndex((image) => image.url === heroImage)
+        );
+        const strip = renderFrameStrip(group.images, img, conf, idx);
         if (strip) actions.appendChild(strip);
-        actions.appendChild(nextBtn);
-        card.appendChild(actions);
+        right.appendChild(actions);
       }
     }
+    body.appendChild(left);
+    body.appendChild(right);
+    card.appendChild(body);
     eventsList.appendChild(card);
   });
 
@@ -687,6 +781,12 @@ function renderLatestImage() {
   const image = document.createElement("img");
   image.src = event.image_url;
   image.alt = event.plate || "capture";
+  image.classList.add("latest-thumb");
+  image.addEventListener("click", () => {
+    if (event && event.id) {
+      jumpToEvent(String(event.id));
+    }
+  });
   latestImageEl.appendChild(image);
   const badge = document.createElement("div");
   badge.className = "badge";
@@ -733,19 +833,21 @@ function renderLatestEvent() {
   latestEventEl.innerHTML = "";
   if (!latest) {
     latestEventEl.textContent = "No recent plate events.";
-    if (cooldownEl) cooldownEl.textContent = "Opening the gate: --";
-    if (tabletCooldown) tabletCooldown.textContent = "Opening the gate: --";
+    if (cooldownEl) cooldownEl.textContent = "Last opened: --";
+    if (tabletCooldown) tabletCooldown.textContent = "Last opened: --";
     return;
   }
   latestEventEl.innerHTML = `
     <div class="plate">${latest.plate || "UNKNOWN"}${latest.owner ? ` - ${latest.owner}` : ""}</div>
     <div class="meta">${formatDayTimeLabel(latest.captured_at)} - ${formatRelative(latest.captured_at)}</div>
   `;
-  if (cooldownEl && latest.kind === "recognised") {
-    cooldownEl.textContent = `Last opened: ${formatRelative(latest.captured_at)}`;
+  if (cooldownEl) {
+    const lastOpen = formatRelativeEpoch(state.lastGateOpenTs);
+    cooldownEl.textContent = `Last opened: ${lastOpen}`;
   }
-  if (tabletCooldown && latest.kind === "recognised") {
-    tabletCooldown.textContent = `Last opened: ${formatRelative(latest.captured_at)}`;
+  if (tabletCooldown) {
+    const lastOpen = formatRelativeEpoch(state.lastGateOpenTs);
+    tabletCooldown.textContent = `Last opened: ${lastOpen}`;
   }
 }
 
@@ -761,6 +863,17 @@ async function refreshLatest() {
   } catch (err) {
     setStatus("Refresh failed");
   }
+}
+
+async function refreshGateLastOpen() {
+  try {
+    const resp = await fetch("/api/gate-last-open");
+    const data = await resp.json();
+    state.lastGateOpenTs = Number.isFinite(data.last_open_ts) ? data.last_open_ts : null;
+  } catch (err) {
+    state.lastGateOpenTs = null;
+  }
+  renderLatestEvent();
 }
 
 function setActiveTab(target, { updateHash = true } = {}) {
@@ -1073,6 +1186,7 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
       } else {
         setStatus("Gate opened");
         initCooldownStatus();
+        refreshGateLastOpen();
       }
     } catch (err) {
       setStatus("Open failed");
@@ -1144,6 +1258,32 @@ function initLatestJump() {
   });
 }
 
+function jumpToEvent(eventId) {
+  const historyTab = document.querySelector('.tab[data-tab="candidates"]');
+  if (historyTab) historyTab.click();
+  setKindFilters(["recognised", "unmatched"]);
+  fetchEvents({ reset: true });
+  const attempt = (tries = 0) => {
+    const cards = document.querySelectorAll(".event-card[data-event-ids]");
+    for (const card of cards) {
+      const ids = (card.dataset.eventIds || "").split(",").map((id) => id.trim());
+      if (ids.includes(eventId)) {
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        card.classList.add("highlight");
+        setTimeout(() => card.classList.remove("highlight"), 1200);
+        return;
+      }
+    }
+    if (tries < 6) {
+      if (!state.loadingEvents) {
+        fetchEvents();
+      }
+      setTimeout(() => attempt(tries + 1), 500);
+    }
+  };
+  setTimeout(() => attempt(0), 300);
+}
+
 async function initCooldownStatus() {
   try {
     const resp = await fetch("/api/gate-cooldown");
@@ -1166,6 +1306,7 @@ async function initCooldownStatus() {
         })
       );
     }
+    refreshGateLastOpen();
   } catch (err) {
     setStatus("Gate open window check failed");
   }
@@ -1194,9 +1335,14 @@ async function initMain() {
   state.latestRecognised = null;
   await fetchEvents({ reset: true });
   initCooldownStatus();
+  refreshGateLastOpen();
   updateStatusTimestamp();
   refreshLatest();
   setInterval(refreshLatest, 15000);
+  setInterval(() => {
+    renderLatestEvent();
+  }, 30000);
+  setInterval(refreshGateLastOpen, 30000);
   setInterval(() => {
     if (isTabActive("home")) {
       const now = Date.now();
@@ -1237,6 +1383,13 @@ async function initTabletStream() {
     const lower = url.toLowerCase();
     if (lower.startsWith("rtsp://")) {
       if (status) status.textContent = "RTSP not supported in browsers.";
+      return;
+    }
+    if (LEGACY_IOS) {
+      url = "/static/stream.jpg";
+      frame.innerHTML = "";
+      frame.appendChild(createLegacyStreamImage(url));
+      if (status) status.textContent = "Live";
       return;
     }
     const stack = createSmoothImageStream(url);
@@ -1301,6 +1454,14 @@ function renderTabletTimeline() {
         <span>${rel}</span>
       </div>
     `;
+    if (!document.body.classList.contains("fullscreen-page")) {
+      if (event.id !== undefined && event.id !== null) {
+        row.classList.add("clickable");
+        row.addEventListener("click", () => {
+          jumpToEvent(String(event.id));
+        });
+      }
+    }
     list.appendChild(row);
   });
   if (!state.tabletEvents.length) {
@@ -1330,6 +1491,21 @@ async function initStream() {
     let el = null;
     if (lower.startsWith("rtsp://")) {
       if (status) status.textContent = "RTSP is not supported in browsers.";
+      return;
+    }
+    if (LEGACY_IOS) {
+      url = "/static/stream.jpg";
+      el = createLegacyStreamImage(url);
+      frame.innerHTML = "";
+      if (fpsEl) {
+        frame.appendChild(fpsEl);
+      }
+      frame.appendChild(el);
+      if (status) status.textContent = "Live";
+      startStreamFps(el);
+      initStreamLag();
+      initStreamHealth();
+      initSystemHealth();
       return;
     }
     if (lower.endsWith(".m3u8") || lower.endsWith(".mp4") || lower.endsWith(".webm")) {
@@ -1662,7 +1838,17 @@ function formatRelative(ts) {
   const date = new Date(ts.replace(" ", "T"));
   if (Number.isNaN(date.getTime())) return ts;
   const delta = Math.max(0, Date.now() - date.getTime());
-  const minutes = Math.floor(delta / 60000);
+  return formatRelativeDelta(delta);
+}
+
+function formatRelativeEpoch(epochSeconds) {
+  if (!Number.isFinite(epochSeconds)) return "--";
+  const delta = Math.max(0, Date.now() - epochSeconds * 1000);
+  return formatRelativeDelta(delta);
+}
+
+function formatRelativeDelta(deltaMs) {
+  const minutes = Math.floor(deltaMs / 60000);
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
