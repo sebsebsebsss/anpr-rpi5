@@ -858,6 +858,11 @@ body.theme-dark .log-ts {
   align-items: center;
 }
 
+.allowlist-actions {
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+
 .link {
   color: var(--accent-strong);
   text-decoration: none;

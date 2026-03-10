@@ -1814,6 +1814,7 @@ function initTimeline() {
 async function initAdmin() {
   const addPlateBtn = document.getElementById("add-plate");
   const savePlatesBtn = document.getElementById("save-plates");
+  const platesList = document.getElementById("plates-list");
   setStatus("Loading...");
   await loadAllowlist();
   if (Array.isArray(state.plates) && state.plates.length && Array.isArray(state.plates[0])) {
@@ -1826,9 +1827,16 @@ async function initAdmin() {
   }
   renderAllowlist();
   setStatus("Ready");
-addPlateBtn.addEventListener("click", () => {
+  addPlateBtn.addEventListener("click", () => {
     state.plates.push({ owner: "", plates: [] });
     renderAllowlist();
+    if (!platesList) return;
+    const rows = platesList.querySelectorAll(".plate-row");
+    const last = rows[rows.length - 1];
+    if (!last) return;
+    const ownerInput = last.querySelector(".owner-input");
+    if (ownerInput) ownerInput.focus();
+    last.scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
   savePlatesBtn.addEventListener("click", saveAllowlist);
 }

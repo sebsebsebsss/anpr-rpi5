@@ -173,18 +173,6 @@
   tags:
     - deploy
 
-- name: Install allowlist file (if present)
-  copy:
-    src: files/plate_allowlist.json
-    dest: /opt/gate_anpr/allowlist.json
-    owner: pi
-    group: pi
-    mode: "0644"
-  when: gate_anpr_allowlist.stat.exists
-  notify: restart gate_anpr
-  tags:
-    - deploy
-
 - name: Check for remote allowlist file
   stat:
     path: /opt/gate_anpr/allowlist.json
@@ -192,14 +180,30 @@
   tags:
     - deploy
 
-- name: Create empty allowlist file if missing
+- name: Seed allowlist from repo only when remote file is missing
+  copy:
+    src: files/plate_allowlist.json
+    dest: /opt/gate_anpr/allowlist.json
+    owner: pi
+    group: pi
+    mode: "0644"
+  when:
+    - gate_anpr_allowlist.stat.exists
+    - not gate_anpr_allowlist_remote.stat.exists
+  notify: restart gate_anpr
+  tags:
+    - deploy
+
+- name: Create empty allowlist file when no local or remote allowlist exists
   copy:
     dest: /opt/gate_anpr/allowlist.json
     content: "[]\n"
     owner: pi
     group: pi
     mode: "0644"
-  when: not gate_anpr_allowlist_remote.stat.exists
+  when:
+    - not gate_anpr_allowlist.stat.exists
+    - not gate_anpr_allowlist_remote.stat.exists
   notify: restart gate_anpr
   tags:
     - deploy
