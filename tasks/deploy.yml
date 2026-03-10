@@ -1,0 +1,530 @@
+---
+- name: Ensure plates directory exists
+  file:
+    path: "{{ plates_dir }}"
+    state: directory
+    owner: pi
+    group: pi
+    mode: "0755"
+  tags:
+    - deploy
+
+- name: Install monthly plate purge cron (older than 180 days)
+  cron:
+    name: "Purge old plate images"
+    user: pi
+    minute: "17"
+    hour: "3"
+    day: "1"
+    job: "find {{ plates_dir }} -type f -name '*.jpg' -mtime +180 -delete"
+  tags:
+    - deploy
+
+- name: Install monthly system log purge cron (older than 180 days)
+  cron:
+    name: "Purge old system logs"
+    user: root
+    minute: "37"
+    hour: "3"
+    day: "1"
+    job: "journalctl --vacuum-time=180d >/dev/null 2>&1"
+  tags:
+    - deploy
+
+- name: Install daily events DB purge cron (older than 30 days)
+  cron:
+    name: "Purge old plate events"
+    user: pi
+    minute: "27"
+    hour: "3"
+    job: "sqlite3 /opt/gate_anpr/events.db \"DELETE FROM events WHERE captured_at < datetime('now','-30 days'); VACUUM;\""
+  tags:
+    - deploy
+
+- name: Ensure app directory exists
+  file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: pi
+    group: pi
+    mode: "0755"
+  tags:
+    - deploy
+
+- name: Ensure events database exists
+  file:
+    path: "{{ app_dir }}/events.db"
+    state: touch
+    owner: pi
+    group: pi
+    mode: "0644"
+  tags:
+    - deploy
+
+- name: Ensure app tests directory exists
+  file:
+    path: "{{ app_dir }}/tests"
+    state: directory
+    owner: pi
+    group: pi
+    mode: "0755"
+  tags:
+    - deploy
+
+- name: Ensure web app directory exists
+  file:
+    path: "{{ app_dir }}/web"
+    state: directory
+    owner: pi
+    group: pi
+    mode: "0755"
+  tags:
+    - deploy
+    - web
+
+- name: Copy synthetic job helper
+  copy:
+    src: tests/synthetic_job.py
+    dest: "{{ app_dir }}/tests/synthetic_job.py"
+    owner: pi
+    group: pi
+    mode: "0755"
+  tags:
+    - deploy
+
+- name: Copy web app backend
+  copy:
+    src: files/web/app.py
+    dest: "{{ app_dir }}/web/app.py"
+    owner: pi
+    group: pi
+    mode: "0755"
+  notify: restart gate_anpr_web
+  tags:
+    - deploy
+    - web
+
+- name: Copy web app static files
+  copy:
+    src: files/web/static/
+    dest: "{{ app_dir }}/web/static/"
+    owner: pi
+    group: pi
+    mode: "0755"
+  notify: restart gate_anpr_web
+  tags:
+    - deploy
+    - web
+
+- name: Copy Python gate worker
+  copy:
+    src: files/new_gate_anpr.py
+    dest: "{{ script_path }}"
+    owner: pi
+    group: pi
+    mode: "0755"
+  notify: restart gate_anpr
+  tags:
+    - deploy
+
+- name: Check for local gate_anpr env file
+  stat:
+    path: "{{ gate_anpr_env_path }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: gate_anpr_env
+  tags:
+    - deploy
+
+- name: Load gate_anpr env overrides for web stream
+  set_fact:
+    gate_web_stream_url: "{{ lookup('ini', 'GATE_WEB_STREAM_URL type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_url) }}"
+    gate_web_stream_rtsp_url: "{{ lookup('ini', 'GATE_WEB_STREAM_RTSP_URL type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_rtsp_url) }}"
+    gate_web_stream_fps: "{{ lookup('ini', 'GATE_WEB_STREAM_FPS type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_fps) }}"
+    gate_web_stream_width: "{{ lookup('ini', 'GATE_WEB_STREAM_WIDTH type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_width) }}"
+    gate_web_stream_height: "{{ lookup('ini', 'GATE_WEB_STREAM_HEIGHT type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_height) }}"
+  when: gate_anpr_env.stat.exists
+  tags:
+    - deploy
+
+- name: Install gate_anpr env file (if present)
+  copy:
+    src: "{{ gate_anpr_env_path }}"
+    dest: /etc/gate_anpr.env
+    owner: root
+    group: root
+    mode: "0600"
+  when: gate_anpr_env.stat.exists
+  notify:
+    - restart gate_anpr
+    - restart gate_anpr_web
+    - restart gate_anpr_stream_jpeg
+  tags:
+    - deploy
+
+- name: Check for local allowlist file
+  stat:
+    path: files/plate_allowlist.json
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: gate_anpr_allowlist
+  tags:
+    - deploy
+
+- name: Install allowlist file (if present)
+  copy:
+    src: files/plate_allowlist.json
+    dest: /opt/gate_anpr/allowlist.json
+    owner: pi
+    group: pi
+    mode: "0644"
+  when: gate_anpr_allowlist.stat.exists
+  notify: restart gate_anpr
+  tags:
+    - deploy
+
+- name: Check for remote allowlist file
+  stat:
+    path: /opt/gate_anpr/allowlist.json
+  register: gate_anpr_allowlist_remote
+  tags:
+    - deploy
+
+- name: Create empty allowlist file if missing
+  copy:
+    dest: /opt/gate_anpr/allowlist.json
+    content: "[]\n"
+    owner: pi
+    group: pi
+    mode: "0644"
+  when: not gate_anpr_allowlist_remote.stat.exists
+  notify: restart gate_anpr
+  tags:
+    - deploy
+
+- name: Remove venv when forcing a rebuild
+  file:
+    path: "{{ venv_path }}"
+    state: absent
+  when: (recreate_venv | default(false)) | bool
+  tags:
+    - deploy
+
+- name: Create Python venv if missing (use system site-packages for RPi.GPIO)
+  command: python3 -m venv --system-site-packages "{{ venv_path }}"
+  args:
+    creates: "{{ venv_path }}/bin/python"
+  tags:
+    - deploy
+
+- name: Install Python dependencies into venv
+  pip:
+    virtualenv: "{{ venv_path }}"
+    name:
+      - requests
+      - greenstalk
+      - flask
+  tags:
+    - deploy
+
+- name: Ensure libcap utilities are installed (for binding to port 80)
+  apt:
+    name: libcap2-bin
+    state: present
+  tags:
+    - deploy
+
+- name: Resolve venv python path for setcap
+  command: readlink -f "{{ venv_path }}/bin/python"
+  register: venv_python_real
+  changed_when: false
+  tags:
+    - deploy
+
+- name: Allow venv python to bind low ports
+  command: setcap cap_net_bind_service=+ep "{{ venv_python_real.stdout }}"
+  when: venv_python_real.stdout != ""
+  tags:
+    - deploy
+
+- name: Install systemd unit for alprd (source-build or override-friendly)
+  copy:
+    dest: /etc/systemd/system/alprd.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=OpenALPR Daemon (alprd)
+      {% if alprd_stream_is_http %}
+      After=network-online.target beanstalkd.service gate_anpr_stream.service
+      Wants=network-online.target
+      Requires=beanstalkd.service gate_anpr_stream.service
+      {% else %}
+      After=network-online.target beanstalkd.service
+      Wants=network-online.target
+      Requires=beanstalkd.service
+      {% endif %}
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=simple
+      User=pi
+      Group=pi
+      WorkingDirectory=/home/pi
+      Environment=OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|stimeout;5000000
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=alprd
+      {% if alprd_cpu_affinity | length > 0 %}
+      CPUAffinity={{ alprd_cpu_affinity }}
+      {% endif %}
+      ExecStart={{ alprd_bin }} --config /etc/openalpr/ -l /var/log/alpr.log -f
+      Restart=always
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: daemon-reload
+  tags:
+    - deploy
+
+- name: Install systemd unit for gate_anpr
+  copy:
+    dest: /etc/systemd/system/gate_anpr.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Opens the Gate if a matching reg plate is seen.
+      After=network-online.target beanstalkd.service alprd.service
+      Wants=network-online.target
+      Requires=beanstalkd.service alprd.service
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=simple
+      User=pi
+      WorkingDirectory={{ app_dir }}
+      EnvironmentFile=-/etc/gate_anpr.env
+      ExecStart={{ venv_path }}/bin/python -u {{ script_path }}
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=gate_anpr
+      Restart=always
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: daemon-reload
+  tags:
+    - deploy
+
+- name: Install systemd unit for gate_anpr_web
+  copy:
+    dest: /etc/systemd/system/gate_anpr_web.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Gate ANPR Web UI
+      After=network-online.target gate_anpr.service
+      Wants=network-online.target
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=simple
+      User=pi
+      WorkingDirectory={{ app_dir }}/web
+      EnvironmentFile=-/etc/gate_anpr.env
+      ExecStart={{ venv_path }}/bin/python {{ app_dir }}/web/app.py
+      Restart=always
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: daemon-reload
+  tags:
+    - deploy
+    - web
+
+- name: Install stream watchdog script
+  copy:
+    dest: /usr/local/bin/gate_anpr_stream_watchdog.sh
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      FILE="{{ gate_web_stream_jpeg }}"
+      STATE="/run/gate_anpr_stream_watchdog.state"
+      if ! systemctl is-active --quiet gate_anpr_stream_jpeg; then
+        systemctl restart gate_anpr_stream_jpeg
+        exit 0
+      fi
+      if [ ! -f "$FILE" ]; then
+        systemctl restart gate_anpr_stream_jpeg
+        exit 0
+      fi
+      NOW=$(date +%s)
+      MTIME=$(stat -c %Y "$FILE" 2>/dev/null || echo 0)
+      AGE=$((NOW - MTIME))
+      LAST_MTIME=""
+      COUNT=0
+      if [ -f "$STATE" ]; then
+        LAST_MTIME=$(awk '{print $1}' "$STATE" 2>/dev/null || echo "")
+        COUNT=$(awk '{print $2}' "$STATE" 2>/dev/null || echo 0)
+      fi
+      if [ "$MTIME" = "$LAST_MTIME" ]; then
+        COUNT=$((COUNT + 1))
+      else
+        COUNT=0
+      fi
+      echo "$MTIME $COUNT" > "$STATE"
+      if [ "$AGE" -gt 20 ] || [ "$COUNT" -ge 3 ]; then
+        systemctl restart gate_anpr_stream_jpeg
+        echo "0 0" > "$STATE"
+      fi
+  when: gate_web_stream_rtsp_url | length > 0
+  tags:
+    - deploy
+
+- name: Install systemd unit for stream watchdog
+  copy:
+    dest: /etc/systemd/system/gate_anpr_stream_watchdog.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Gate ANPR stream watchdog
+      After=gate_anpr_stream_jpeg.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/gate_anpr_stream_watchdog.sh
+  when: gate_web_stream_rtsp_url | length > 0
+  notify: daemon-reload
+  tags:
+    - deploy
+
+- name: Install systemd timer for stream watchdog
+  copy:
+    dest: /etc/systemd/system/gate_anpr_stream_watchdog.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Gate ANPR stream watchdog timer
+
+      [Timer]
+      OnBootSec=30s
+      OnUnitActiveSec=20s
+      AccuracySec=5s
+
+      [Install]
+      WantedBy=timers.target
+  when: gate_web_stream_rtsp_url | length > 0
+  notify: daemon-reload
+  tags:
+    - deploy
+
+- name: Install stream writer helper
+  copy:
+    src: files/gate_anpr_stream_writer.py
+    dest: /usr/local/bin/gate_anpr_stream_writer.py
+    owner: root
+    group: root
+    mode: "0755"
+  when: gate_web_stream_rtsp_url | length > 0
+  tags:
+    - deploy
+
+- name: Install systemd unit for gate_anpr_stream_jpeg
+  copy:
+    dest: /etc/systemd/system/gate_anpr_stream_jpeg.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Gate ANPR Live Stream (RTSP to JPEG)
+      After=network-online.target
+      Wants=network-online.target
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=simple
+      User=pi
+      EnvironmentFile=-/etc/gate_anpr.env
+      Environment=GATE_WEB_STREAM_RTSP_URL={{ gate_web_stream_rtsp_url }}
+      ExecStart=/bin/sh -c 'exec ionice -c2 -n7 nice -n 10 /usr/bin/ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -analyzeduration 0 -probesize 32k -max_delay 0 -rtsp_transport tcp -i ${GATE_WEB_STREAM_RTSP_URL} -an -vf scale=${GATE_WEB_STREAM_WIDTH}:${GATE_WEB_STREAM_HEIGHT} -r ${GATE_WEB_STREAM_FPS} -q:v 7 -f image2pipe -vcodec mjpeg - | /usr/bin/python3 /usr/local/bin/gate_anpr_stream_writer.py {{ gate_web_stream_jpeg }}'
+      Restart=always
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
+  when: gate_web_stream_rtsp_url | length > 0
+  notify: daemon-reload
+  tags:
+    - deploy
+
+- name: Enable and start services
+  systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - beanstalkd
+    - alprd
+    - gate_anpr
+    - gate_anpr_web
+  tags:
+    - deploy
+
+- name: Enable and start JPEG stream service
+  systemd:
+    name: gate_anpr_stream_jpeg
+    enabled: true
+    state: started
+  when: gate_web_stream_rtsp_url | length > 0
+  tags:
+    - deploy
+
+- name: Enable and start stream watchdog timer
+  systemd:
+    name: gate_anpr_stream_watchdog.timer
+    enabled: true
+    state: started
+  when: gate_web_stream_rtsp_url | length > 0
+  tags:
+    - deploy
+
+- name: Restart web UI to load stream URL
+  systemd:
+    name: gate_anpr_web
+    state: restarted
+  when: gate_web_stream_url | length > 0
+  tags:
+    - deploy
+    - web
+
+- name: Verify alprd binary exists
+  command: "{{ alprd_bin }} --version"
+  register: alprd_version
+  changed_when: false
+  failed_when: alprd_version.rc not in [0, 1]
+  tags:
+    - deploy
+
+- name: Verify Python imports inside venv
+  command: "{{ venv_path }}/bin/python -c \"import requests, greenstalk; import RPi.GPIO\""
+  changed_when: false
+  tags:
+    - deploy

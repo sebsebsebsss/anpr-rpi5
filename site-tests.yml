@@ -1,0 +1,13 @@
+---
+- name: Optional ANPR test tasks
+  hosts: gatepi
+  become: true
+
+  vars:
+    app_dir: /opt/gate_anpr
+    venv_path: /opt/gate_anpr/venv
+    run_openalpr_smoketest: false
+
+  tasks:
+    - name: Run optional test workflows
+      import_tasks: tasks/test.yml
