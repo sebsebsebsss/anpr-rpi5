@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="gate-api-secret" content="__GATE_API_SHARED_SECRET__" />
     <title>Gate ANPR Admin</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -35,12 +36,12 @@
             <h1>Plate Allowlist</h1>
             <p>Saved to the Pi allowlist JSON.</p>
           </div>
-          <div class="card-actions">
-            <button id="add-plate" class="btn btn-secondary">Add</button>
-            <button id="save-plates" class="btn">Save</button>
-          </div>
         </div>
         <div id="plates-list" class="plates"></div>
+        <div class="card-actions allowlist-actions">
+          <button id="add-plate" class="btn btn-secondary">Add</button>
+          <button id="save-plates" class="btn">Save</button>
+        </div>
       </section>
 
       <section class="card">

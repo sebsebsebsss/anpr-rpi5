@@ -6,6 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Gate ANPR" />
+    <meta name="gate-api-secret" content="__GATE_API_SHARED_SECRET__" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>Gate ANPR</title>
     <link rel="stylesheet" href="styles.css" />
@@ -141,10 +142,15 @@
             </div>
           </div>
           <p class="legend">
-            Recognised plates only, newest first. Compact view for quick scans.
+            Combined audit log of actual gate opens from ANPR and manual actions.
           </p>
           <div id="timeline-list" class="timeline-list"></div>
           <div id="timeline-more" class="feed-status">Scroll for more</div>
+          <div class="timeline-pagination">
+            <button id="timeline-prev" class="btn btn-secondary" type="button">Previous</button>
+            <div id="timeline-page-info" class="legend">Page 1</div>
+            <button id="timeline-next" class="btn btn-secondary" type="button">Next</button>
+          </div>
         </div>
       </section>
 
@@ -180,6 +186,14 @@
               <div class="stat-label">Avg Processing</div>
               <div id="stat-processing" class="stat-value">--</div>
             </div>
+            <div class="stat">
+              <div class="stat-label">Gate Opens</div>
+              <div id="stat-gate-opens" class="stat-value">--</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Manual Opens</div>
+              <div id="stat-manual-opens" class="stat-value">--</div>
+            </div>
             <div class="stat stat-donut">
               <div class="stat-label">Recognised vs Unmatched</div>
               <div id="stats-donut" class="donut"></div>
@@ -213,6 +227,45 @@
               <div class="insight-title">No-plate captures</div>
               <div id="insight-no-plate" class="insight-value">--</div>
               <div id="insight-no-plate-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Top manual IP</div>
+              <div id="insight-top-manual-ip" class="insight-value">--</div>
+              <div id="insight-top-manual-ip-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Last gate open</div>
+              <div id="insight-last-open" class="insight-value">--</div>
+              <div id="insight-last-open-meta" class="insight-sub">--</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>System health</h2>
+            <div class="chart-label">Live Pi and maintenance status.</div>
+          </div>
+          <div class="insight-grid">
+            <div class="insight">
+              <div class="insight-title">Disk free</div>
+              <div id="health-disk-free" class="insight-value">--</div>
+              <div id="health-disk-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">CPU temp</div>
+              <div id="health-temp" class="insight-value">--</div>
+              <div id="health-temp-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Maintenance</div>
+              <div id="health-maintenance" class="insight-value">--</div>
+              <div id="health-maintenance-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Failed units</div>
+              <div id="health-failures" class="insight-value">--</div>
+              <div id="health-failures-meta" class="insight-sub">--</div>
             </div>
           </div>
         </section>

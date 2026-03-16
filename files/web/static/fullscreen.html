@@ -6,6 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Gate ANPR" />
+    <meta name="gate-api-secret" content="__GATE_API_SHARED_SECRET__" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>Gate ANPR Fullscreen</title>
     <link rel="stylesheet" href="styles.css" />
@@ -131,7 +132,7 @@
           <div class="card-head">
             <div>
               <h2>Timeline</h2>
-              <p class="legend">Recognised plates only, newest first. Compact view for quick scans.</p>
+              <p class="legend">Combined audit log of actual gate opens from ANPR and manual actions.</p>
             </div>
             <div class="filters">
               <button class="chip" data-window="7d">Last 7 days</button>
@@ -140,12 +141,17 @@
             </div>
           </div>
           <div id="timeline-list" class="timeline-list"></div>
-          <div id="timeline-more" class="feed-status">Scroll for more</div>
+          <div id="timeline-more" class="feed-status">Recognised and manual opens.</div>
+          <div class="timeline-pagination">
+            <button id="timeline-prev" class="btn btn-secondary" type="button">Previous</button>
+            <div id="timeline-page-info" class="legend">Page 1</div>
+            <button id="timeline-next" class="btn btn-secondary" type="button">Next</button>
+          </div>
         </div>
       </section>
 
       <section id="tab-stats" class="tab-panel" role="tabpanel" aria-hidden="true">
-        <div class="card stats-card">
+        <section class="card">
           <div class="card-head">
             <h2>Summary</h2>
             <div class="filters">
@@ -155,24 +161,135 @@
               <button class="chip" data-window="all">Forever</button>
             </div>
           </div>
-          <div class="stats-grid" id="stats-summary"></div>
-        </div>
+          <div class="stat-grid">
+            <div class="stat">
+              <div class="stat-label">Total Events</div>
+              <div id="stat-total" class="stat-value">--</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Recognised</div>
+              <div id="stat-recognised" class="stat-value">--</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Unmatched</div>
+              <div id="stat-unmatched" class="stat-value">--</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Allowlist Hit Rate</div>
+              <div id="stat-hit-rate" class="stat-value">--</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Avg Processing</div>
+              <div id="stat-processing" class="stat-value">--</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Gate Opens</div>
+              <div id="stat-gate-opens" class="stat-value">--</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Manual Opens</div>
+              <div id="stat-manual-opens" class="stat-value">--</div>
+            </div>
+            <div class="stat stat-donut">
+              <div class="stat-label">Recognised vs Unmatched</div>
+              <div id="stats-donut" class="donut"></div>
+              <div id="stats-donut-legend" class="donut-legend">--</div>
+            </div>
+          </div>
+        </section>
 
-        <div class="card stats-card">
+        <section class="card">
           <div class="card-head">
             <h2>Insights</h2>
-            <div class="legend" id="stats-window-label">Window: 24h</div>
+            <div id="insight-label" class="chart-label">Loading…</div>
           </div>
-          <div class="stats-grid stats-grid--tight" id="stats-insights"></div>
-        </div>
+          <div class="insight-grid">
+            <button class="insight" id="insight-top-plate-card" type="button">
+              <div class="insight-title">Most popular reg</div>
+              <div id="insight-top-plate" class="insight-value">--</div>
+              <div id="insight-top-plate-meta" class="insight-sub">--</div>
+            </button>
+            <button class="insight" id="insight-top-unmatched-card" type="button">
+              <div class="insight-title">Most common miss</div>
+              <div id="insight-top-unmatched" class="insight-value">--</div>
+              <div id="insight-top-unmatched-meta" class="insight-sub">--</div>
+            </button>
+            <button class="insight" id="insight-busiest-card" type="button">
+              <div class="insight-title">Peak activity</div>
+              <div id="insight-busiest" class="insight-value">--</div>
+              <div id="insight-busiest-meta" class="insight-sub">--</div>
+            </button>
+            <div class="insight">
+              <div class="insight-title">No-plate captures</div>
+              <div id="insight-no-plate" class="insight-value">--</div>
+              <div id="insight-no-plate-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Top manual IP</div>
+              <div id="insight-top-manual-ip" class="insight-value">--</div>
+              <div id="insight-top-manual-ip-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Last gate open</div>
+              <div id="insight-last-open" class="insight-value">--</div>
+              <div id="insight-last-open-meta" class="insight-sub">--</div>
+            </div>
+          </div>
+        </section>
 
-        <div class="card stats-card">
+        <section class="card">
+          <div class="card-head">
+            <h2>System health</h2>
+            <div class="chart-label">Live Pi and maintenance status.</div>
+          </div>
+          <div class="insight-grid">
+            <div class="insight">
+              <div class="insight-title">Disk free</div>
+              <div id="health-disk-free" class="insight-value">--</div>
+              <div id="health-disk-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">CPU temp</div>
+              <div id="health-temp" class="insight-value">--</div>
+              <div id="health-temp-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Maintenance</div>
+              <div id="health-maintenance" class="insight-value">--</div>
+              <div id="health-maintenance-meta" class="insight-sub">--</div>
+            </div>
+            <div class="insight">
+              <div class="insight-title">Failed units</div>
+              <div id="health-failures" class="insight-value">--</div>
+              <div id="health-failures-meta" class="insight-sub">--</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>Plate word cloud</h2>
+            <div class="chart-label">Most seen plates in this window.</div>
+          </div>
+          <div class="cloud-grid">
+            <div>
+              <h3>Recognised</h3>
+              <div id="cloud-recognised" class="word-cloud"></div>
+            </div>
+            <div>
+              <h3>Unmatched</h3>
+              <div id="cloud-unmatched" class="word-cloud"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
           <div class="card-head">
             <h2>Activity</h2>
-            <div class="legend" id="stats-series-empty">No data yet.</div>
+            <div id="chart-label" class="chart-label">Loading…</div>
           </div>
           <canvas id="stats-chart" height="220"></canvas>
-        </div>
+        </section>
       </section>
 
       <section id="tab-logs" class="tab-panel" role="tabpanel" aria-hidden="true">

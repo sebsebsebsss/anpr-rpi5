@@ -4,30 +4,24 @@
 import os
 import sys
 import traceback
-import logging
 import time
 import json
 import requests
-import sqlite3
 from time import gmtime, strftime
 
 import greenstalk
-import RPi.GPIO as GPIO
+from gate_runtime import configure_logging, env_int, init_events_db, insert_event, open_gate
+
 
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
 ALLOWLIST_PATH = os.getenv("PLATE_ALLOWLIST_PATH", "").strip()
 ALLOWLIST_JSON = os.getenv("PLATE_ALLOWLIST_JSON", "").strip()
 FUZZY_ALLOWLIST = os.getenv("FUZZY_ALLOWLIST", "0").lower() in {"1", "true", "yes", "on"}
-FUZZY_MAX_DISTANCE = int(os.getenv("FUZZY_MAX_DISTANCE", "1"))
+FUZZY_MAX_DISTANCE = env_int("FUZZY_MAX_DISTANCE", 1, "gate_anpr")
 FUZZY_MIN_CONFIDENCE = float(os.getenv("FUZZY_MIN_CONFIDENCE", "85"))
 
-DEBUG = os.getenv("GATE_ANPR_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
-logging.basicConfig(
-    level=logging.DEBUG if DEBUG else logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger("gate_anpr")
+log = configure_logging("gate_anpr", log_path="/var/log/gate-anpr/gate-anpr.log")
 
 server = "127.0.0.1"
 port = 11300
@@ -37,18 +31,23 @@ last_seen_time = 0
 last_seen_allowed = {}
 last_seen_unmatched = {}
 
-MATCH_DEDUP_SECONDS = int(os.getenv("MATCH_DEDUP_SECONDS", "60"))
-UNMATCHED_DEDUP_SECONDS = int(os.getenv("UNMATCHED_DEDUP_SECONDS", "30"))
+MATCH_DEDUP_SECONDS = env_int("MATCH_DEDUP_SECONDS", 60, "gate_anpr")
+UNMATCHED_DEDUP_SECONDS = env_int("UNMATCHED_DEDUP_SECONDS", 30, "gate_anpr")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
 EVENT_SOURCE = os.getenv("GATE_ANPR_EVENT_SOURCE", "alprd")
 
 
-def _load_plate_allowlist():
+def _resolve_allowlist_path():
     path = ALLOWLIST_PATH
     if not path and os.path.exists("/opt/gate_anpr/allowlist.json"):
         path = "/opt/gate_anpr/allowlist.json"
     if not path and os.path.exists("/etc/gate_anpr_allowlist.json"):
         path = "/etc/gate_anpr_allowlist.json"
+    return path
+
+
+def _load_plate_allowlist():
+    path = _resolve_allowlist_path()
     if path:
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -56,19 +55,19 @@ def _load_plate_allowlist():
             mtime = os.path.getmtime(path)
         except FileNotFoundError:
             log.error("Allowlist file not found: %s", path)
-            return [], None
+            return [], None, path
         except json.JSONDecodeError as exc:
             log.error("Invalid allowlist JSON in %s: %s", path, exc)
-            return [], None
+            return [], None, path
     elif ALLOWLIST_JSON:
         try:
             data = json.loads(ALLOWLIST_JSON)
             mtime = None
         except json.JSONDecodeError as exc:
             log.error("Invalid PLATE_ALLOWLIST_JSON: %s", exc)
-            return [], None
+            return [], None, None
     else:
-        return [], None
+        return [], None, None
     allowlist = []
     for item in data:
         if isinstance(item, (list, tuple)) and len(item) == 2:
@@ -84,18 +83,18 @@ def _load_plate_allowlist():
             allowlist.append((str(item["plate"]).upper(), str(item["owner"])))
         else:
             log.warning("Skipping malformed allowlist entry: %r", item)
-    return allowlist, mtime
+    return allowlist, mtime, path
 
 
-list_of_plates, allowlist_mtime = _load_plate_allowlist()
+list_of_plates, allowlist_mtime, allowlist_watch_path = _load_plate_allowlist()
 if not list_of_plates:
     log.warning("No plates configured (PLATE_ALLOWLIST_PATH/PLATE_ALLOWLIST_JSON is empty)")
 
 # NOTE: you had GPIO.BOARD with gatePin=23 in the original.
 # That is internally inconsistent with the comment, but it "works" in your current setup.
 # Keeping the same defaults while allowing overrides via env.
-gatePin = int(os.getenv("GATE_PIN_BOARD", "23"))  # legacy BOARD numbering
-gatePin_bcm = int(os.getenv("GATE_PIN_BCM", "11"))  # BOARD 23 maps to BCM 11 on Raspberry Pi
+gatePin = env_int("GATE_PIN_BOARD", 23, "gate_anpr")  # legacy BOARD numbering
+gatePin_bcm = env_int("GATE_PIN_BCM", 11, "gate_anpr")  # BOARD 23 maps to BCM 11 on Raspberry Pi
 
 PUSHOVER_ENABLED = bool(PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN)
 if not PUSHOVER_ENABLED:
@@ -148,83 +147,6 @@ def _fuzzy_allowlist_match(candidate, allowlist_map):
     return best_plate, best_owner, best_dist
 
 
-def _open_gate():
-    log.debug("GPIO setup: mode=BOARD pin=%s", gatePin)
-    try:
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BOARD)
-        GPIO.setup(gatePin, GPIO.OUT)  # Gate pin set as output
-        GPIO.output(gatePin, GPIO.HIGH)
-        time.sleep(0.5)
-        GPIO.output(gatePin, GPIO.LOW)
-        GPIO.cleanup()
-        return
-    except RuntimeError as exc:
-        # RPi.GPIO may not yet support Pi 5; fallback to lgpio (BCM numbering).
-        log.warning("RPi.GPIO failed (%s). Falling back to lgpio BCM %s", exc, gatePin_bcm)
-
-    try:
-        import lgpio  # type: ignore
-    except Exception as exc:
-        log.error("lgpio not available; cannot toggle gate pin: %s", exc)
-        raise
-
-    handle = lgpio.gpiochip_open(0)
-    try:
-        lgpio.gpio_claim_output(handle, gatePin_bcm, 0)
-        lgpio.gpio_write(handle, gatePin_bcm, 1)
-        time.sleep(0.5)
-        lgpio.gpio_write(handle, gatePin_bcm, 0)
-    finally:
-        lgpio.gpiochip_close(handle)
-
-
-def _init_events_db():
-    conn = sqlite3.connect(EVENTS_DB_PATH)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uuid TEXT,
-                plate TEXT,
-                owner TEXT,
-                allowed INTEGER,
-                confidence REAL,
-                kind TEXT,
-                image_name TEXT,
-                captured_at TEXT,
-                source TEXT,
-                processing_time_ms INTEGER,
-                observed_plate TEXT,
-                observed_confidence REAL,
-                fuzzy_distance INTEGER,
-                fuzzy INTEGER,
-                created_at TEXT
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_captured_at ON events(captured_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_plate ON events(plate)")
-        conn.commit()
-        _ensure_column(conn, "events", "source", "TEXT")
-        _ensure_column(conn, "events", "processing_time_ms", "INTEGER")
-        _ensure_column(conn, "events", "observed_plate", "TEXT")
-        _ensure_column(conn, "events", "observed_confidence", "REAL")
-        _ensure_column(conn, "events", "fuzzy_distance", "INTEGER")
-        _ensure_column(conn, "events", "fuzzy", "INTEGER")
-    finally:
-        conn.close()
-
-
-def _ensure_column(conn, table, column, column_type):
-    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-        conn.commit()
-
-
 def _record_event(
     *,
     uuid,
@@ -241,51 +163,64 @@ def _record_event(
     fuzzy_distance=None,
     fuzzy=None,
 ):
-    created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    conn = sqlite3.connect(EVENTS_DB_PATH, timeout=10)
-    try:
-        conn.execute(
-            """
-            INSERT INTO events (
-                uuid, plate, owner, allowed, confidence, kind, image_name, captured_at,
-                source, processing_time_ms, observed_plate, observed_confidence, fuzzy_distance, fuzzy,
-                created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                uuid,
-                plate,
-                owner,
-                int(allowed),
-                confidence,
-                kind,
-                image_name,
-                captured_at,
-                EVENT_SOURCE,
-                processing_time_ms,
-                observed_plate,
-                observed_confidence,
-                fuzzy_distance,
-                fuzzy,
-                created_at,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    insert_event(
+        EVENTS_DB_PATH,
+        uuid=uuid,
+        plate=plate,
+        owner=owner,
+        allowed=allowed,
+        confidence=confidence,
+        kind=kind,
+        image_name=image_name,
+        captured_at=captured_at,
+        source=EVENT_SOURCE,
+        processing_time_ms=processing_time_ms,
+        observed_plate=observed_plate,
+        observed_confidence=observed_confidence,
+        fuzzy_distance=fuzzy_distance,
+        fuzzy=fuzzy,
+    )
 
 
 def _maybe_reload_allowlist():
-    global list_of_plates, allowlist_mtime
-    if not ALLOWLIST_PATH:
+    global list_of_plates, allowlist_mtime, allowlist_watch_path
+    path = _resolve_allowlist_path()
+    if not path:
         return
     try:
-        mtime = os.path.getmtime(ALLOWLIST_PATH)
+        mtime = os.path.getmtime(path)
     except FileNotFoundError:
         return
-    if allowlist_mtime is None or mtime != allowlist_mtime:
-        list_of_plates, allowlist_mtime = _load_plate_allowlist()
+    if allowlist_watch_path != path or allowlist_mtime is None or mtime != allowlist_mtime:
+        list_of_plates, allowlist_mtime, allowlist_watch_path = _load_plate_allowlist()
         log.info("Reloaded plate allowlist (%s entries)", len(list_of_plates))
+
+
+def _extract_job_data(job):
+    body_str = _job_body_to_str(job.body)
+    log.debug("Job %s body length=%s", getattr(job, "id", "?"), len(body_str))
+    payload = json.loads(body_str)
+    if not isinstance(payload, dict):
+        raise ValueError("job payload must be a JSON object")
+    epoch_time = payload.get("epoch_time")
+    if not isinstance(epoch_time, (int, float)):
+        raise ValueError("job payload missing numeric epoch_time")
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        raise ValueError("job payload missing results")
+    first_result = results[0]
+    if not isinstance(first_result, dict):
+        raise ValueError("job payload results[0] must be an object")
+    candidates = first_result.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("job payload results[0].candidates must be a list")
+    for idx, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            raise ValueError(f"candidate {idx} must be an object")
+        plate = candidate.get("plate")
+        if not isinstance(plate, str) or not plate.strip():
+            raise ValueError(f"candidate {idx} missing plate")
+    return payload, candidates
 
 
 def _new_client():
@@ -318,9 +253,7 @@ def consumer_main(client):
 
         try:
             # Parse job JSON
-            body_str = _job_body_to_str(job.body)
-            log.debug("Job %s body length=%s", getattr(job, "id", "?"), len(body_str))
-            json_raw = json.loads(body_str)
+            json_raw, candidates = _extract_job_data(job)
             _maybe_reload_allowlist()
 
             # Touch early to reduce chance of TTR expiry during GPIO/pushover I/O
@@ -328,7 +261,6 @@ def consumer_main(client):
 
             capture_epoch = json_raw["epoch_time"] / 1000
             min_time = capture_epoch + 10
-            candidates = json_raw["results"][0]["candidates"]
             no_of_plates_seen = len(candidates)
             uuid = json_raw.get("uuid")
             image_name = f"{uuid}.jpg" if uuid else ""
@@ -384,7 +316,7 @@ def consumer_main(client):
                         else:
                             log.info("Plate %s recognised. Opening gate", number_plate)
 
-                        _open_gate()
+                        open_gate(gatePin, gatePin_bcm, log)
 
                         jpg_path = "/home/pi/plates/%s.jpg" % uuid if uuid else ""
                         log.debug("Sending pushover with image %s", jpg_path)
@@ -503,6 +435,12 @@ def consumer_main(client):
             client.delete(job)
             log.debug("Job %s processed and deleted", getattr(job, "id", "?"))
 
+        except ValueError as exc:
+            log.error("Dropping malformed job %s: %s", getattr(job, "id", "?"), exc)
+            try:
+                client.delete(job)
+            except Exception:
+                log.exception("Failed to delete malformed job %s", getattr(job, "id", "?"))
         except Exception:
             log.exception("Exception in consumer loop")
             traceback.print_exc()
@@ -517,7 +455,7 @@ def consumer_main(client):
 def main():
     try:
         log.info("Setting up connection")
-        _init_events_db()
+        init_events_db(EVENTS_DB_PATH)
         client = _new_client()
 
         log.info("Opening the gate for:")

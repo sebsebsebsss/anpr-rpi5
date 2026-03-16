@@ -1,0 +1,54 @@
+---
+- name: Check for local OpenALPR test image
+  stat:
+    path: "{{ openalpr_test_image_path | default('tests/Test Image.png') }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: openalpr_test_image
+  when: run_openalpr_smoketest | bool
+  tags:
+    - test
+
+- name: Fail if smoketest requested but test image is missing
+  fail:
+    msg: "OpenALPR smoketest requested but {{ openalpr_test_image_path | default('tests/Test Image.png') }} is missing."
+  when: run_openalpr_smoketest | bool and (not openalpr_test_image.stat.exists)
+  tags:
+    - test
+
+- name: Copy OpenALPR test image
+  copy:
+    src: "{{ openalpr_test_image_path | default('tests/Test Image.png') }}"
+    dest: /tmp/openalpr_test.png
+    owner: root
+    group: root
+    mode: "0644"
+  when: run_openalpr_smoketest | bool and openalpr_test_image.stat.exists
+  tags:
+    - test
+
+- name: Run OpenALPR smoketest
+  command: alpr -c eu -n 10 /tmp/openalpr_test.png
+  register: openalpr_smoketest
+  changed_when: false
+  when: run_openalpr_smoketest | bool and openalpr_test_image.stat.exists
+  tags:
+    - test
+
+- name: Fail if smoketest finds no plates
+  fail:
+    msg: "OpenALPR smoketest failed: no plates detected in {{ openalpr_test_image_path | default('tests/Test Image.png') }}."
+  when: run_openalpr_smoketest | bool and ('No license plates found.' in openalpr_smoketest.stdout)
+  tags:
+    - test
+
+- name: Enqueue synthetic ALPR job (optional)
+  command: >
+    {{ venv_path }}/bin/python {{ app_dir }}/tests/synthetic_job.py
+    --plate {{ synthetic_plate | default('A1ABC') }}
+    --delay {{ synthetic_delay | default(60) }}
+  when: (run_synthetic_job | default(false)) | bool
+  changed_when: false
+  tags:
+    - test

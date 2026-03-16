@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
+import hmac
 import json
 import logging
 import math
 import os
 import re
+import shutil
 import subprocess
+import sys
+from html import escape
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -13,23 +17,38 @@ import time
 import sqlite3
 import fcntl
 
-import RPi.GPIO as GPIO
-
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
+ROOT_DIR = os.path.dirname(APP_DIR)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from gate_runtime import (
+    configure_logging,
+    env_int,
+    init_events_db,
+    insert_event,
+    now_local_str,
+    open_gate as trigger_gate,
+    parse_local_timestamp,
+    sqlite_healthcheck,
+)
 
 ALLOWLIST_PATH = os.getenv("PLATE_ALLOWLIST_PATH", "/opt/gate_anpr/allowlist.json")
-LOG_PATH = "/var/log/gate-anpr/gate-anpr.log"
+LOG_PATH = "/var/log/gate-anpr/gate_anpr_web.log"
 PLATES_DIR = "/home/pi/plates"
-GATE_PIN_BOARD = 23
-GATE_PIN_BCM = 11
+GATE_PIN_BOARD = env_int("GATE_PIN_BOARD", 23, "gate_anpr_web")
+GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
-GATE_COOLDOWN_SECONDS = int(os.getenv("GATE_WEB_COOLDOWN", "30"))
-MATCH_DEDUP_SECONDS = int(os.getenv("MATCH_DEDUP_SECONDS", "60"))
+GATE_COOLDOWN_SECONDS = env_int("GATE_WEB_COOLDOWN", 30, "gate_anpr_web")
+MATCH_DEDUP_SECONDS = env_int("MATCH_DEDUP_SECONDS", 60, "gate_anpr_web")
 GATE_COOLDOWN_PATH = os.getenv(
     "GATE_WEB_COOLDOWN_PATH", "/opt/gate_anpr/open_gate_last.txt"
 )
 UI_SETTINGS_PATH = "/opt/gate_anpr/ui_settings.json"
+API_SHARED_SECRET = os.getenv("GATE_API_SHARED_SECRET", "").strip()
+MAINTENANCE_LOG_PATH = "/var/log/gate-anpr/gate-maintenance.log"
+log = configure_logging("gate_anpr_web", log_path=LOG_PATH)
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
@@ -59,6 +78,16 @@ def _write_ui_settings(data):
         json.dump(data, handle, indent=2)
         handle.write("\n")
     os.replace(tmp_path, UI_SETTINGS_PATH)
+
+
+def _render_static_html(filename):
+    path = os.path.join(STATIC_DIR, filename)
+    with open(path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    content = content.replace(
+        "__GATE_API_SHARED_SECRET__", escape(API_SHARED_SECRET, quote=True)
+    )
+    return app.response_class(content, mimetype="text/html")
 
 
 def _get_timezone_name():
@@ -183,57 +212,38 @@ def add_no_cache_headers(response):
     return response
 
 
-def _init_events_db():
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+@app.before_request
+def require_api_secret():
+    if not API_SHARED_SECRET:
+        return None
+    if request.method == "OPTIONS":
+        return None
+    if not request.path.startswith("/api/"):
+        return None
+    supplied = request.headers.get("X-Gate-Api-Secret", "")
+    if hmac.compare_digest(supplied, API_SHARED_SECRET):
+        return None
+    return jsonify({"error": "forbidden"}), 403
+
+
+def _parse_detail(value):
+    if not value:
+        return None
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uuid TEXT,
-                plate TEXT,
-                owner TEXT,
-                allowed INTEGER,
-                confidence REAL,
-                kind TEXT,
-                image_name TEXT,
-                captured_at TEXT,
-                source TEXT,
-                processing_time_ms INTEGER,
-                created_at TEXT
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_captured_at ON events(captured_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_plate ON events(plate)")
-        conn.commit()
-        _ensure_column(conn, "events", "source", "TEXT")
-        _ensure_column(conn, "events", "processing_time_ms", "INTEGER")
-        _ensure_column(conn, "events", "observed_plate", "TEXT")
-        _ensure_column(conn, "events", "observed_confidence", "REAL")
-        _ensure_column(conn, "events", "fuzzy_distance", "INTEGER")
-        _ensure_column(conn, "events", "fuzzy", "INTEGER")
-    finally:
-        conn.close()
+        return json.loads(value)
+    except Exception:
+        return value
 
 
-def _ensure_column(conn, table, column, column_type):
-    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-        conn.commit()
-
-
-def _query_events(kind=None, offset=0, limit=60, since=None):
+def _query_events(kinds=None, offset=0, limit=60, since=None):
     conn = sqlite3.connect(EVENTS_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
         clauses = []
         params = []
-        if kind:
-            clauses.append("kind = ?")
-            params.append(kind)
+        if kinds:
+            clauses.append("kind IN ({})".format(",".join(["?"] * len(kinds))))
+            params.extend(kinds)
         if since:
             clauses.append("captured_at >= ?")
             params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
@@ -266,6 +276,8 @@ def _query_events(kind=None, offset=0, limit=60, since=None):
                     "observed_confidence": row["observed_confidence"],
                     "fuzzy_distance": row["fuzzy_distance"],
                     "fuzzy": bool(row["fuzzy"]) if row["fuzzy"] is not None else False,
+                    "request_ip": row["request_ip"],
+                    "detail": _parse_detail(row["detail"]),
                     "image_name": image_name,
                     "image_url": f"/images/{image_name}" if image_name else "",
                 }
@@ -275,7 +287,7 @@ def _query_events(kind=None, offset=0, limit=60, since=None):
         conn.close()
 
 
-_init_events_db()
+init_events_db(EVENTS_DB_PATH)
 
 
 def _read_allowlist():
@@ -390,34 +402,6 @@ def _parse_events(lines, allowlist_set):
     return events
 
 
-def _open_gate():
-    try:
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BOARD)
-        GPIO.setup(GATE_PIN_BOARD, GPIO.OUT)
-        GPIO.output(GATE_PIN_BOARD, GPIO.HIGH)
-        time.sleep(0.5)
-        GPIO.output(GATE_PIN_BOARD, GPIO.LOW)
-        GPIO.cleanup()
-        return
-    except RuntimeError:
-        pass
-
-    try:
-        import lgpio  # type: ignore
-    except Exception:
-        raise
-
-    handle = lgpio.gpiochip_open(0)
-    try:
-        lgpio.gpio_claim_output(handle, GATE_PIN_BCM, 0)
-        lgpio.gpio_write(handle, GATE_PIN_BCM, 1)
-        time.sleep(0.5)
-        lgpio.gpio_write(handle, GATE_PIN_BCM, 0)
-    finally:
-        lgpio.gpiochip_close(handle)
-
-
 def _read_last_open_time():
     try:
         with open(GATE_COOLDOWN_PATH, "r", encoding="utf-8") as handle:
@@ -456,7 +440,7 @@ def _gate_cooldown_remaining_locked():
     return remaining
 
 
-def _gate_check_and_mark():
+def _gate_run_with_cooldown(action):
     with open(GATE_COOLDOWN_PATH, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         handle.seek(0)
@@ -467,12 +451,124 @@ def _gate_check_and_mark():
         now = time.time()
         remaining = max(0, int(GATE_COOLDOWN_SECONDS - (now - last_ts)))
         if remaining == 0:
+            action()
             handle.seek(0)
             handle.truncate()
             handle.write(f"{now:.3f}\n")
             handle.flush()
         fcntl.flock(handle, fcntl.LOCK_UN)
     return remaining
+
+
+def _request_ip():
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    route = request.access_route or []
+    if route:
+        return route[0]
+    return request.remote_addr or ""
+
+
+def _latest_gate_open_event():
+    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT id, captured_at, kind, source, request_ip, detail
+            FROM events
+            WHERE kind IN ('recognised', 'manual_open')
+            ORDER BY captured_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    detail = _parse_detail(row["detail"])
+    captured_at = row["captured_at"]
+    ts = parse_local_timestamp(captured_at)
+    return {
+        "id": row["id"],
+        "captured_at": captured_at,
+        "last_open_ts": ts.timestamp() if ts else None,
+        "kind": row["kind"],
+        "source": row["source"],
+        "request_ip": row["request_ip"],
+        "detail": detail,
+    }
+
+
+def _read_cpu_temperature_c():
+    paths = [
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/devices/virtual/thermal/thermal_zone0/temp",
+    ]
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = handle.read().strip()
+            value = float(raw)
+            if value > 1000:
+                value /= 1000.0
+            return round(value, 1)
+        except Exception:
+            continue
+    return None
+
+
+def _failed_systemd_units():
+    try:
+        result = subprocess.run(
+            ["systemctl", "--failed", "--no-legend", "--plain"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return []
+    if result.returncode not in (0, 1):
+        return []
+    units = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        units.append(line.split()[0])
+    return units
+
+
+def _maintenance_health():
+    latest_success = None
+    latest_error = None
+    lines = _tail_lines(MAINTENANCE_LOG_PATH, 200)
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        match = re.match(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Pruned ", line)
+        if match and latest_success is None:
+            latest_success = match.group("ts")
+        if latest_error is None and re.search(r"\b(ERROR|Traceback|failed)\b", line, re.IGNORECASE):
+            latest_error = line
+        if latest_success and latest_error:
+            break
+    success_dt = parse_local_timestamp(latest_success) if latest_success else None
+    age_hours = None
+    stale = True
+    if success_dt:
+        age_hours = round((datetime.now() - success_dt).total_seconds() / 3600, 1)
+        stale = age_hours > 36
+    return {
+        "log_path": MAINTENANCE_LOG_PATH,
+        "last_success": latest_success,
+        "age_hours": age_hours,
+        "stale": stale if latest_success else True,
+        "last_error": latest_error,
+    }
 
 
 @app.route("/api/plates", methods=["GET"])
@@ -575,10 +671,30 @@ def get_allowlist_status():
 
 @app.route("/api/open-gate", methods=["POST"])
 def open_gate():
-    remaining = _gate_check_and_mark()
+    request_ip = _request_ip()
+    remaining = _gate_run_with_cooldown(
+        lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log)
+    )
     if remaining > 0:
         return jsonify({"ok": False, "retry_in": remaining}), 429
-    _open_gate()
+    insert_event(
+        EVENTS_DB_PATH,
+        plate="",
+        owner="",
+        allowed=True,
+        confidence=None,
+        kind="manual_open",
+        image_name="",
+        captured_at=now_local_str(),
+        source="web_ui",
+        request_ip=request_ip,
+        detail={
+            "action": "open_gate",
+            "label": "Manual open",
+            "user_agent": request.user_agent.string or "",
+        },
+    )
+    log.info("Manual gate open triggered from %s", request_ip or "unknown")
     return jsonify({"ok": True})
 
 
@@ -589,28 +705,81 @@ def get_gate_cooldown():
 
 @app.route("/api/gate-last-open", methods=["GET"])
 def get_gate_last_open():
+    latest = _latest_gate_open_event()
+    if latest:
+        return jsonify(latest)
     last_ts = _read_last_open_time()
     if last_ts <= 0:
         return jsonify({"last_open_ts": None, "last_open_iso": None})
     last_iso = datetime.fromtimestamp(last_ts).isoformat()
-    return jsonify({"last_open_ts": last_ts, "last_open_iso": last_iso})
+    return jsonify(
+        {
+            "last_open_ts": last_ts,
+            "last_open_iso": last_iso,
+            "kind": "unknown",
+            "source": "cooldown_file",
+            "request_ip": None,
+            "detail": None,
+        }
+    )
 
 
 @app.route("/api/events", methods=["GET"])
 def get_events():
     limit = int(request.args.get("limit", "200"))
     offset = int(request.args.get("offset", "0"))
-    kind = request.args.get("kind")
+    kind_arg = request.args.get("kind", "").strip()
+    kinds = [part.strip() for part in kind_arg.split(",") if part.strip()] or None
     window_key = request.args.get("window")
     if not window_key:
         window_key = "30d"
     window = _window_bounds(window_key) if window_key else None
-    events = _query_events(kind=kind, offset=offset, limit=limit, since=window)
+    events = _query_events(kinds=kinds, offset=offset, limit=limit, since=window)
     return jsonify(events)
 
 
+@app.route("/api/timeline", methods=["GET"])
+def get_timeline():
+    per_page = min(max(int(request.args.get("per_page", "25")), 5), 100)
+    page = max(int(request.args.get("page", "1")), 1)
+    window_key = request.args.get("window", "30d")
+    if window_key not in {"7d", "30d", "all"}:
+        return jsonify({"error": "invalid window"}), 400
+    window = _window_bounds(window_key)
+    kinds = ["recognised", "manual_open"]
+    offset = (page - 1) * per_page
+    items = _query_events(kinds=kinds, offset=offset, limit=per_page, since=window)
+
+    conn = sqlite3.connect(EVENTS_DB_PATH)
+    try:
+        clauses = ["kind IN ({})".format(",".join(["?"] * len(kinds)))]
+        params = list(kinds)
+        if window:
+            clauses.append("captured_at >= ?")
+            params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    total_pages = max(1, math.ceil(total / per_page)) if total else 1
+    return jsonify(
+        {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": total_pages,
+            "has_prev": page > 1,
+            "has_next": page < total_pages,
+            "items": items,
+        }
+    )
+
+
 def _window_bounds(window):
-    now = datetime.utcnow()
+    now = datetime.now()
     if window == "24h":
         return now - timedelta(hours=24)
     if window == "7d":
@@ -647,7 +816,7 @@ def _stats_counts(window):
 def _stats_timeseries(window):
     conn = sqlite3.connect(EVENTS_DB_PATH)
     try:
-        if window and window >= datetime.utcnow() - timedelta(days=2):
+        if window and window >= datetime.now() - timedelta(days=2):
             rows = conn.execute(
                 """
                 SELECT strftime('%Y-%m-%d %H:00', captured_at) as bucket, COUNT(*)
@@ -755,8 +924,10 @@ def _stats_top_list(window, kinds, limit=12):
         return [{"plate": row[0], "count": row[1]} for row in rows]
     finally:
         conn.close()
+
+
 def _stats_busiest_bucket(window):
-    now = datetime.utcnow()
+    now = datetime.now()
     bucket = "day"
     if window and window >= now - timedelta(days=2):
         bucket = "hour"
@@ -828,7 +999,7 @@ def _stats_processing_ms(window, kind=None):
 def _stats_no_plate(window):
     conn = sqlite3.connect(EVENTS_DB_PATH)
     try:
-        where = ["(plate IS NULL OR plate = '')"]
+        where = ["(plate IS NULL OR plate = '')", "kind IN ('recognised', 'unmatched', 'candidate')"]
         params = []
         if window:
             where.append("captured_at >= ?")
@@ -844,6 +1015,70 @@ def _stats_no_plate(window):
         conn.close()
 
 
+def _stats_recent_gate_opens(window):
+    conn = sqlite3.connect(EVENTS_DB_PATH)
+    try:
+        where = ["kind IN ('recognised', 'manual_open')"]
+        params = []
+        if window:
+            where.append("captured_at >= ?")
+            params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE {' AND '.join(where)}",
+            params,
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+def _stats_source_breakdown(window):
+    conn = sqlite3.connect(EVENTS_DB_PATH)
+    try:
+        where = ["kind IN ('recognised', 'manual_open')"]
+        params = []
+        if window:
+            where.append("captured_at >= ?")
+            params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
+        rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(source, ''), 'unknown') as source, COUNT(*)
+            FROM events
+            WHERE {' AND '.join(where)}
+            GROUP BY source
+            ORDER BY COUNT(*) DESC
+            """,
+            params,
+        ).fetchall()
+        return [{"source": row[0], "count": row[1]} for row in rows]
+    finally:
+        conn.close()
+
+
+def _stats_manual_open_top_ips(window, limit=5):
+    conn = sqlite3.connect(EVENTS_DB_PATH)
+    try:
+        where = ["kind = 'manual_open'", "request_ip IS NOT NULL", "request_ip != ''"]
+        params = []
+        if window:
+            where.append("captured_at >= ?")
+            params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
+        rows = conn.execute(
+            f"""
+            SELECT request_ip, COUNT(*) as count
+            FROM events
+            WHERE {' AND '.join(where)}
+            GROUP BY request_ip
+            ORDER BY count DESC, request_ip ASC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+        return [{"request_ip": row[0], "count": row[1]} for row in rows]
+    finally:
+        conn.close()
+
+
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
     window_key = request.args.get("window", "24h")
@@ -854,12 +1089,15 @@ def get_stats():
     summary = {kind: count for kind, count in counts}
     total = sum(summary.values())
     timeseries = _stats_timeseries(window)
+    gate_opens = _stats_recent_gate_opens(window)
     return jsonify(
         {
             "window": window_key,
             "total": total,
             "counts": summary,
             "timeseries": timeseries,
+            "gate_opens": gate_opens,
+            "source_breakdown": _stats_source_breakdown(window),
         }
     )
 
@@ -883,6 +1121,9 @@ def get_stats_insights():
             "unmatched": _stats_processing_ms(window, "unmatched"),
         },
         "no_plate": _stats_no_plate(window),
+        "top_manual_ips": _stats_manual_open_top_ips(window),
+        "latest_gate_open": _latest_gate_open_event(),
+        "source_breakdown": _stats_source_breakdown(window),
     }
     return jsonify({"window": window_key, "insights": insights})
 
@@ -954,7 +1195,7 @@ def ui_settings():
 @app.route("/api/stream-lag", methods=["GET"])
 def stream_lag():
     stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     if not os.path.exists(stream_path):
         return jsonify({"lag_ms": None, "frame_mtime": None})
     mtime = os.path.getmtime(stream_path)
@@ -965,7 +1206,7 @@ def stream_lag():
 @app.route("/api/stream-health", methods=["GET"])
 def stream_health():
     stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(timezone.utc).timestamp()
     stale_seconds = int(os.getenv("GATE_WEB_STREAM_STALE_SECONDS", "10"))
     stream_mtime = os.path.getmtime(stream_path) if os.path.exists(stream_path) else None
     stream_age = now - stream_mtime if stream_mtime else None
@@ -1009,12 +1250,31 @@ def _latest_event_timestamp():
         ).fetchone()
     finally:
         conn.close()
-    if not row or not row[0]:
-        return None
-    try:
-        return datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return None
+    return parse_local_timestamp(row[0]) if row and row[0] else None
+
+
+@app.route("/api/healthz", methods=["GET"])
+def healthz():
+    db_ok, db_error = sqlite_healthcheck(EVENTS_DB_PATH)
+    allowlist_ok = os.path.exists(ALLOWLIST_PATH) and os.access(ALLOWLIST_PATH, os.R_OK)
+    stream_path = os.path.join(STATIC_DIR, "stream.jpg")
+    stream_exists = os.path.exists(stream_path)
+    services = {
+        "alprd": _systemctl_is_active("alprd"),
+        "gate_anpr": _systemctl_is_active("gate_anpr"),
+        "gate_anpr_web": _systemctl_is_active("gate_anpr_web"),
+    }
+    ok = db_ok and allowlist_ok and services["gate_anpr_web"] == "active"
+    return jsonify(
+        {
+            "ok": ok,
+            "db": {"ok": db_ok, "error": db_error},
+            "allowlist": {"ok": allowlist_ok, "path": ALLOWLIST_PATH},
+            "stream": {"exists": stream_exists},
+            "services": services,
+            "maintenance": _maintenance_health(),
+        }
+    ), (200 if ok else 503)
 
 
 @app.route("/api/service-health", methods=["GET"])
@@ -1022,17 +1282,31 @@ def service_health():
     services = {
         "alprd": _systemctl_is_active("alprd"),
         "gate_anpr": _systemctl_is_active("gate_anpr"),
+        "gate_anpr_web": _systemctl_is_active("gate_anpr_web"),
         "stream_jpeg": _systemctl_is_active("gate_anpr_stream_jpeg"),
     }
     last_event = _latest_event_timestamp()
+    latest_open = _latest_gate_open_event()
     now = datetime.now()
     last_event_age = (now - last_event).total_seconds() if last_event else None
+    disk_total, disk_used, disk_free = shutil.disk_usage("/")
+    failed_units = _failed_systemd_units()
     return jsonify(
         {
             "services": services,
             "last_event_time": last_event.isoformat() if last_event else None,
             "last_event_age_s": last_event_age,
             "now": now.isoformat(),
+            "last_gate_open": latest_open,
+            "disk": {
+                "total_bytes": disk_total,
+                "used_bytes": disk_used,
+                "free_bytes": disk_free,
+                "free_pct": round((disk_free / disk_total) * 100, 1) if disk_total else None,
+            },
+            "temperature_c": _read_cpu_temperature_c(),
+            "failed_units": failed_units,
+            "maintenance": _maintenance_health(),
         }
     )
 
@@ -1097,25 +1371,27 @@ def get_image(name):
 
 @app.route("/")
 def index():
-    return send_from_directory(STATIC_DIR, "index.html")
+    return _render_static_html("index.html")
 
 
 @app.route("/admin")
 def admin():
-    return send_from_directory(STATIC_DIR, "admin.html")
+    return _render_static_html("admin.html")
 
 @app.route("/fullscreen")
 def fullscreen():
-    return send_from_directory(STATIC_DIR, "fullscreen.html")
+    return _render_static_html("fullscreen.html")
 
 
 @app.route("/stats")
 def stats():
-    return send_from_directory(STATIC_DIR, "index.html")
+    return _render_static_html("index.html")
 
 
 @app.route("/<path:path>")
 def static_proxy(path):
+    if path in {"index.html", "admin.html", "fullscreen.html", "stats.html"}:
+        return _render_static_html(path)
     return send_from_directory(STATIC_DIR, path)
 
 
