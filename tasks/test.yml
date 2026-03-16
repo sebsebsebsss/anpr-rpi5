@@ -1,7 +1,7 @@
 ---
 - name: Check for local OpenALPR test image
   stat:
-    path: tests/Test Image.png
+    path: "{{ openalpr_test_image_path | default('tests/Test Image.png') }}"
   delegate_to: localhost
   become: false
   run_once: true
@@ -12,14 +12,14 @@
 
 - name: Fail if smoketest requested but test image is missing
   fail:
-    msg: "OpenALPR smoketest requested but tests/Test Image.png is missing."
+    msg: "OpenALPR smoketest requested but {{ openalpr_test_image_path | default('tests/Test Image.png') }} is missing."
   when: run_openalpr_smoketest | bool and (not openalpr_test_image.stat.exists)
   tags:
     - test
 
 - name: Copy OpenALPR test image
   copy:
-    src: tests/Test Image.png
+    src: "{{ openalpr_test_image_path | default('tests/Test Image.png') }}"
     dest: /tmp/openalpr_test.png
     owner: root
     group: root
@@ -38,7 +38,7 @@
 
 - name: Fail if smoketest finds no plates
   fail:
-    msg: "OpenALPR smoketest failed: no plates detected in tests/Test Image.png."
+    msg: "OpenALPR smoketest failed: no plates detected in {{ openalpr_test_image_path | default('tests/Test Image.png') }}."
   when: run_openalpr_smoketest | bool and ('No license plates found.' in openalpr_smoketest.stdout)
   tags:
     - test

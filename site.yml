@@ -31,6 +31,8 @@
     gate_web_stream_fps: "{{ lookup('env', 'GATE_WEB_STREAM_FPS') | default('5', true) }}"
     gate_web_stream_width: "{{ lookup('env', 'GATE_WEB_STREAM_WIDTH') | default('1280', true) }}"
     gate_web_stream_height: "{{ lookup('env', 'GATE_WEB_STREAM_HEIGHT') | default('720', true) }}"
+    gate_web_port: "{{ lookup('env', 'GATE_WEB_PORT') | default('80', true) }}"
+    gate_api_shared_secret: "{{ lookup('env', 'GATE_API_SHARED_SECRET') | default('', true) }}"
     gate_web_stream_encoder: "{{ lookup('env', 'GATE_WEB_STREAM_ENCODER') | default('libx264', true) }}"
     gate_web_stream_hls_dir: "{{ app_dir }}/web/static/hls"
     gate_web_stream_jpeg: "{{ app_dir }}/web/static/stream.jpg"
@@ -73,4 +75,9 @@
     - name: restart avahi-daemon
       systemd:
         name: avahi-daemon
+        state: restarted
+
+    - name: restart systemd-journald
+      systemd:
+        name: systemd-journald
         state: restarted

@@ -51,9 +51,10 @@ flowchart LR
 - Ansible installed on your controller machine
 - SSH access to the Pi
 - Pi reachable on your LAN
+- Outbound internet access on first provision for `apt` packages and, if needed, an OpenALPR source clone
 
 ## Configure secrets
-Pushover credentials and app settings live in a local file (gitignored):
+App settings live in a local file (gitignored):
 
 ```sh
 cp files/gate_anpr.env.example files/gate_anpr.env
@@ -62,13 +63,29 @@ cp files/gate_anpr.env.example files/gate_anpr.env
 Required values in `files/gate_anpr.env`:
 
 ```ini
-PUSHOVER_USER_KEY=...
-PUSHOVER_APP_TOKEN=...
 GATE_ANPR_DEBUG=0
 PLATE_ALLOWLIST_PATH=/opt/gate_anpr/allowlist.json
 GATE_PIN_BOARD=23
 GATE_PIN_BCM=11
 ```
+
+Optional values:
+
+```ini
+PUSHOVER_USER_KEY=...
+PUSHOVER_APP_TOKEN=...
+MATCH_DEDUP_SECONDS=60
+FUZZY_ALLOWLIST=1
+FUZZY_MAX_DISTANCE=1
+FUZZY_MIN_CONFIDENCE=75
+GATE_API_SHARED_SECRET=change-me
+GATE_WEB_STREAM_URL=/static/stream.jpg
+GATE_WEB_STREAM_FPS=12.5
+GATE_WEB_STREAM_WIDTH=1280
+GATE_WEB_STREAM_HEIGHT=720
+```
+
+If `PUSHOVER_USER_KEY` and `PUSHOVER_APP_TOKEN` are omitted, deploy still works; notifications are just disabled.
 
 Create your local allowlist file:
 
@@ -100,6 +117,14 @@ ANSIBLE_BECOME_PASSWORD=...
 ALPRD_STREAM=rtsp://user:pass@camera-ip:554/h264Preview_01_main
 ```
 
+Useful optional values from `ansible.env.example`:
+
+```ini
+ALPRD_CPU_AFFINITY=
+ALPRD_ROI=1,208,2092,888
+GATEPI_ALIAS_HOSTNAME=gate
+```
+
 ## Inventory
 `site.yml` targets host group `gatepi`.
 
@@ -113,6 +138,8 @@ If you want custom host groups, map them under `gatepi` using children.
 
 ## Quickstart
 
+Load controller env before running any `ansible-playbook` command in this README:
+
 ```sh
 set -a
 source ansible.env
@@ -122,11 +149,16 @@ ANSIBLE_BECOME_PASSWORD="$ANSIBLE_BECOME_PASSWORD" ansible-playbook -i inventory
 
 Expected first run behavior:
 - Can take a long time on a fresh Pi (source build path)
+- Needs outbound package/source downloads during provisioning
 - Ends with services enabled and started
 
 ## Fast reruns
 
 ```sh
+set -a
+source ansible.env
+set +a
+
 # Web UI only
 ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site.yml --tags web
 
@@ -139,11 +171,18 @@ ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site.yml --tags
 
 ## Optional test workflows
 Tests are split from the main deployment playbook.
+Load `ansible.env` first as above. The smoketest uses `tests/Test Image.png` by default.
 
 OpenALPR smoketest:
 
 ```sh
 ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_openalpr_smoketest=true
+```
+
+Use a different local test image:
+
+```sh
+ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_openalpr_smoketest=true -e openalpr_test_image_path="tests/test.jpeg"
 ```
 
 Synthetic queue job:

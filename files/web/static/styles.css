@@ -1569,6 +1569,14 @@ textarea {
   gap: 8px;
 }
 
+.timeline-pagination {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .timeline-row {
   display: grid;
   grid-template-columns: 1.1fr 1fr auto;
@@ -1588,6 +1596,11 @@ textarea {
 .timeline-row .meta {
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+.timeline-row--manual_open {
+  border-color: rgba(198, 134, 47, 0.35);
+  background: rgba(198, 134, 47, 0.06);
 }
 
 .timeline-row .owner {

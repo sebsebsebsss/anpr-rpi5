@@ -8,7 +8,7 @@ const state = {
   plateStatus: {},
   events: [],
   eventsOffset: 0,
-  loadingEvents: false,
+  loadingCandidateEvents: false,
   eventsKinds: new Set(["recognised", "unmatched"]),
   latestRecognised: null,
   streamLoaded: false,
@@ -17,7 +17,10 @@ const state = {
   tabletLoaded: false,
   logsLoaded: false,
   timelineEvents: [],
-  timelineOffset: 0,
+  timelinePage: 1,
+  timelinePerPage: 25,
+  timelineTotal: 0,
+  timelineTotalPages: 1,
   timelineWindow: "30d",
   tabletEvents: [],
   tabletLastFetch: 0,
@@ -34,6 +37,8 @@ const state = {
   themeSun: null,
   themeLastFetch: 0,
   lastGateOpenTs: null,
+  lastGateOpenMeta: null,
+  loadingTimelineEvents: false,
 };
 
 const LEGACY_IOS =
@@ -42,6 +47,44 @@ const LEGACY_IOS =
 
 let GROUP_WINDOW_SEC = 60;
 let STREAM_REFRESH_MS = 200;
+const apiSecretMeta = document.querySelector('meta[name="gate-api-secret"]');
+const API_SHARED_SECRET = apiSecretMeta
+  ? (apiSecretMeta.getAttribute("content") || "")
+  : "";
+const nativeFetch = window.fetch.bind(window);
+
+function isApiRequest(resource) {
+  try {
+    if (typeof resource === "string" || resource instanceof URL) {
+      const url = new URL(resource, window.location.href);
+      return url.origin === window.location.origin && url.pathname.startsWith("/api/");
+    }
+    if (resource instanceof Request) {
+      const url = new URL(resource.url, window.location.href);
+      return url.origin === window.location.origin && url.pathname.startsWith("/api/");
+    }
+  } catch (err) {
+    return false;
+  }
+  return false;
+}
+
+window.fetch = function fetchWithApiSecret(resource, init = {}) {
+  if (!API_SHARED_SECRET || !isApiRequest(resource)) {
+    return nativeFetch(resource, init);
+  }
+
+  if (resource instanceof Request) {
+    const headers = new Headers(resource.headers);
+    headers.set("X-Gate-Api-Secret", API_SHARED_SECRET);
+    const nextRequest = new Request(resource, { headers });
+    return nativeFetch(nextRequest, init);
+  }
+
+  const headers = new Headers(init.headers || {});
+  headers.set("X-Gate-Api-Secret", API_SHARED_SECRET);
+  return nativeFetch(resource, { ...init, headers });
+};
 
 function normalizeKind(kind) {
   return kind === "candidate" ? "unmatched" : kind;
@@ -201,12 +244,32 @@ function setGateButtonState(gateBtn, state) {
 }
 
 function getAgeMinutes(ts) {
-  if (!ts) return null;
-  const date = new Date(ts.replace(" ", "T"));
-  if (Number.isNaN(date.getTime())) return null;
+  const date = parseLocalTimestamp(ts);
+  if (!date || Number.isNaN(date.getTime())) return null;
   const diffMs = Date.now() - date.getTime();
   if (diffMs < 0) return 0;
   return Math.floor(diffMs / 60000);
+}
+
+function parseLocalTimestamp(ts) {
+  if (!ts) return null;
+  if (ts instanceof Date) return ts;
+  const match = String(ts).match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
+  );
+  if (match) {
+    return new Date(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6] || 0)
+    );
+  }
+  const fallback = new Date(ts);
+  if (Number.isNaN(fallback.getTime())) return null;
+  return fallback;
 }
 
 function createLegacyStreamImage(url) {
@@ -424,24 +487,40 @@ async function saveAllowlist() {
 }
 
 async function fetchEvents({ reset = false, limit = 30, kind = null } = {}) {
-  if (state.loadingEvents) return;
-  state.loadingEvents = true;
+  if (state.loadingCandidateEvents) return;
+  state.loadingCandidateEvents = true;
   if (reset) {
     state.events = [];
     state.eventsOffset = 0;
   }
-  const resp = await fetch(`/api/events?offset=${state.eventsOffset}&limit=${limit}`);
-  const data = await resp.json();
-  state.eventsOffset += data.length;
-  state.events = state.events.concat(data);
-  state.loadingEvents = false;
-  renderEvents();
+  try {
+    const params = new URLSearchParams({
+      offset: String(state.eventsOffset),
+      limit: String(limit),
+    });
+    if (kind) {
+      params.set("kind", kind);
+    } else {
+      params.set("kind", "recognised,unmatched,candidate");
+    }
+    const resp = await fetch(`/api/events?${params.toString()}`);
+    if (!resp.ok) {
+      throw new Error(`events ${resp.status}`);
+    }
+    const data = await resp.json();
+    state.eventsOffset += data.length;
+    state.events = state.events.concat(data);
+  } catch (err) {
+    setStatus("Failed to load events");
+  } finally {
+    state.loadingCandidateEvents = false;
+    renderEvents();
+  }
 }
 
 function parseCapturedEpoch(ts) {
-  if (!ts) return null;
-  const date = new Date(ts.replace(" ", "T"));
-  if (Number.isNaN(date.getTime())) return null;
+  const date = parseLocalTimestamp(ts);
+  if (!date || Number.isNaN(date.getTime())) return null;
   return date.getTime();
 }
 
@@ -757,7 +836,7 @@ function renderEvents() {
   });
 
   if (eventsMore) {
-    eventsMore.textContent = state.loadingEvents ? "Loading..." : "Scroll for more";
+    eventsMore.textContent = state.loadingCandidateEvents ? "Loading..." : "Scroll for more";
   }
   if (state.events.length === 0 || filtered.length === 0) {
     const empty = document.createElement("div");
@@ -796,8 +875,8 @@ function renderLatestImage() {
 
 function formatDayTime(ts) {
   if (!ts) return "--";
-  const date = new Date(ts.replace(" ", "T"));
-  if (Number.isNaN(date.getTime())) return ts;
+  const date = parseLocalTimestamp(ts);
+  if (!date || Number.isNaN(date.getTime())) return ts;
   const today = new Date();
   const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const startOfThatDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -811,8 +890,8 @@ function formatDayTime(ts) {
 
 function formatDayTimeLabel(ts) {
   if (!ts) return "--";
-  const date = new Date(ts.replace(" ", "T"));
-  if (Number.isNaN(date.getTime())) return ts;
+  const date = parseLocalTimestamp(ts);
+  if (!date || Number.isNaN(date.getTime())) return ts;
   const today = new Date();
   const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const startOfThatDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -843,7 +922,10 @@ function renderLatestEvent() {
   `;
   if (cooldownEl) {
     const lastOpen = formatRelativeEpoch(state.lastGateOpenTs);
-    cooldownEl.textContent = `Last opened: ${lastOpen}`;
+    const source = state.lastGateOpenMeta && state.lastGateOpenMeta.kind === "manual_open"
+      ? ` from ${state.lastGateOpenMeta.request_ip || "unknown"}`
+      : "";
+    cooldownEl.textContent = `Last opened: ${lastOpen}${source}`;
   }
   if (tabletCooldown) {
     const lastOpen = formatRelativeEpoch(state.lastGateOpenTs);
@@ -870,8 +952,10 @@ async function refreshGateLastOpen() {
     const resp = await fetch("/api/gate-last-open");
     const data = await resp.json();
     state.lastGateOpenTs = Number.isFinite(data.last_open_ts) ? data.last_open_ts : null;
+    state.lastGateOpenMeta = data || null;
   } catch (err) {
     state.lastGateOpenTs = null;
+    state.lastGateOpenMeta = null;
   }
   renderLatestEvent();
 }
@@ -1275,7 +1359,7 @@ function jumpToEvent(eventId) {
       }
     }
     if (tries < 6) {
-      if (!state.loadingEvents) {
+      if (!state.loadingCandidateEvents) {
         fetchEvents();
       }
       setTimeout(() => attempt(tries + 1), 500);
@@ -1724,6 +1808,16 @@ async function initSystemHealth() {
       } else {
         parts.push("last plate --");
       }
+      if (data.disk && Number.isFinite(data.disk.free_pct)) {
+        parts.push(`disk ${data.disk.free_pct.toFixed(1)}% free`);
+      }
+      if (Number.isFinite(data.temperature_c)) {
+        parts.push(`${data.temperature_c.toFixed(1)}C`);
+      }
+      const failures = Array.isArray(data.failed_units) ? data.failed_units.length : 0;
+      if (failures) {
+        parts.push(`${failures} failed units`);
+      }
       systemEl.textContent = `System: ${parts.join(" • ")}`;
     } catch (err) {
       systemEl.textContent = "System: --";
@@ -1733,59 +1827,110 @@ async function initSystemHealth() {
   setInterval(update, 5000);
 }
 
-async function fetchTimeline({ reset = false, limit = 60 } = {}) {
+function describeTimelineEvent(event) {
+  const kind = normalizeKind(event.kind);
+  if (kind === "manual_open") {
+    const detail = event.detail && typeof event.detail === "object" ? event.detail : {};
+    const label = detail.label || "Manual open";
+    const ip = event.request_ip ? ` • ${event.request_ip}` : "";
+    return {
+      title: label,
+      meta: `${formatDayTimeLabel(event.captured_at)} • ${formatRelative(event.captured_at)}${ip}`,
+      owner: event.source || "web_ui",
+      confidence: "Gate opened",
+    };
+  }
+  const observed =
+    event.observed_plate && event.observed_plate !== event.plate
+      ? `Observed ${event.observed_plate}`
+      : null;
+  const metaParts = [
+    formatDayTimeLabel(event.captured_at),
+    formatRelative(event.captured_at),
+    kind,
+  ];
+  if (observed) metaParts.push(observed);
+  return {
+    title: event.plate || "UNKNOWN",
+    meta: metaParts.join(" • "),
+    owner: event.owner || "",
+    confidence: Number.isFinite(event.confidence)
+      ? `Conf: ${event.confidence.toFixed(2)}`
+      : "Conf: --",
+  };
+}
+
+function updateTimelinePagination(meta) {
+  const info = document.getElementById("timeline-page-info");
+  const prev = document.getElementById("timeline-prev");
+  const next = document.getElementById("timeline-next");
+  if (info) {
+    const total = Number(meta.total || 0);
+    info.textContent = total
+      ? `Page ${meta.page} of ${meta.total_pages} • ${total} events`
+      : "No events";
+  }
+  if (prev) prev.disabled = !meta.has_prev;
+  if (next) next.disabled = !meta.has_next;
+}
+
+async function fetchTimeline({ page = 1 } = {}) {
   const list = document.getElementById("timeline-list");
   const more = document.getElementById("timeline-more");
-  if (!list || state.loadingEvents) return;
-  state.loadingEvents = true;
-  if (reset) {
-    list.innerHTML = "";
-    state.timelineOffset = 0;
-    state.timelineEvents = [];
+  if (!list || state.loadingTimelineEvents) return;
+  state.loadingTimelineEvents = true;
+  try {
+    state.timelinePage = page;
+    const resp = await fetch(
+      `/api/timeline?page=${state.timelinePage}&per_page=${state.timelinePerPage}&window=${state.timelineWindow}`
+    );
+    if (!resp.ok) {
+      throw new Error(`timeline ${resp.status}`);
+    }
+    const data = await resp.json();
+    state.timelineEvents = Array.isArray(data.items) ? data.items : [];
+    state.timelineTotal = Number(data.total || 0);
+    state.timelineTotalPages = Number(data.total_pages || 1);
+    renderTimeline();
+    updateTimelinePagination(data);
+    if (more) {
+      more.textContent = state.timelineTotal
+        ? "Recognised and manual opens."
+        : "No timeline events in this window";
+    }
+  } catch (err) {
+    if (more) {
+      more.textContent = "Failed to load timeline";
+    }
+  } finally {
+    state.loadingTimelineEvents = false;
   }
-  const resp = await fetch(
-    `/api/events?offset=${state.timelineOffset}&limit=${limit}&kind=recognised&window=${state.timelineWindow}`
-  );
-  const data = await resp.json();
-  state.timelineOffset += data.length;
-  state.timelineEvents = state.timelineEvents.concat(data);
-  renderTimeline();
-  if (more) {
-    more.textContent = data.length ? "Scroll for more" : "No more results";
-  }
-  state.loadingEvents = false;
 }
 
 function renderTimeline() {
   const list = document.getElementById("timeline-list");
   if (!list) return;
   list.innerHTML = "";
-  const groups = groupEventsByWindow(state.timelineEvents);
-  groups.forEach((group) => {
-    const entries = summarizeGroup(group.events);
-    const best = pickBestEntry(entries);
-    if (!best) return;
-    const bestEvent = pickBestEvent(group.events, best) || group.events[0];
-    const conf = Number.isFinite(best.confidence) ? `${best.confidence.toFixed(2)}` : "--";
-    const plate = best.plate || bestEvent.observed_plate || "UNKNOWN";
-    const observed =
-      bestEvent.observed_plate &&
-      bestEvent.observed_plate !== plate
-        ? `Observed: ${bestEvent.observed_plate}`
-        : "";
-    const meta = `${group.captured_at} • ${group.events.length} reads`;
+  state.timelineEvents.forEach((event) => {
+    const rowData = describeTimelineEvent(event);
     const row = document.createElement("div");
-    row.className = "timeline-row";
+    row.className = `timeline-row timeline-row--${normalizeKind(event.kind)}`;
     row.innerHTML = `
       <div>
-        <div class="plate">${plate}</div>
-        <div class="meta">${meta}${observed ? ` • ${observed}` : ""}</div>
+        <div class="plate">${rowData.title}</div>
+        <div class="meta">${rowData.meta}</div>
       </div>
-      <div class="owner">${best.owner || bestEvent.owner || ""}</div>
-      <div class="confidence">Conf: ${conf}</div>
+      <div class="owner">${rowData.owner}</div>
+      <div class="confidence">${rowData.confidence}</div>
     `;
     list.appendChild(row);
   });
+  if (!state.timelineEvents.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No timeline events yet.";
+    list.appendChild(empty);
+  }
 }
 
 function initTimeline() {
@@ -1797,18 +1942,27 @@ function initTimeline() {
         chips.forEach((btn) => btn.classList.remove("active"));
         chip.classList.add("active");
         state.timelineWindow = chip.dataset.window || "7d";
-        fetchTimeline({ reset: true });
+        fetchTimeline({ page: 1 });
       });
     });
   }
-  fetchTimeline({ reset: true });
-  window.addEventListener("scroll", () => {
-    const timelinePanel = document.getElementById("tab-timeline");
-    if (!timelinePanel || !timelinePanel.classList.contains("active")) return;
-    const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 200;
-    if (!nearBottom) return;
-    fetchTimeline();
-  });
+  const prev = document.getElementById("timeline-prev");
+  const next = document.getElementById("timeline-next");
+  if (prev) {
+    prev.addEventListener("click", () => {
+      if (state.timelinePage > 1) {
+        fetchTimeline({ page: state.timelinePage - 1 });
+      }
+    });
+  }
+  if (next) {
+    next.addEventListener("click", () => {
+      if (state.timelinePage < state.timelineTotalPages) {
+        fetchTimeline({ page: state.timelinePage + 1 });
+      }
+    });
+  }
+  fetchTimeline({ page: 1 });
 }
 
 async function initAdmin() {
@@ -1843,8 +1997,8 @@ async function initAdmin() {
 
 function formatRelative(ts) {
   if (!ts) return "--";
-  const date = new Date(ts.replace(" ", "T"));
-  if (Number.isNaN(date.getTime())) return ts;
+  const date = parseLocalTimestamp(ts);
+  if (!date || Number.isNaN(date.getTime())) return ts;
   const delta = Math.max(0, Date.now() - date.getTime());
   return formatRelativeDelta(delta);
 }
@@ -1878,6 +2032,8 @@ async function initStats() {
   const unmatchEl = document.getElementById("stat-unmatched");
   const hitRateEl = document.getElementById("stat-hit-rate");
   const processingEl = document.getElementById("stat-processing");
+  const gateOpensEl = document.getElementById("stat-gate-opens");
+  const manualOpensEl = document.getElementById("stat-manual-opens");
   const insightLabel = document.getElementById("insight-label");
   const topPlateEl = document.getElementById("insight-top-plate");
   const topPlateMetaEl = document.getElementById("insight-top-plate-meta");
@@ -1887,6 +2043,18 @@ async function initStats() {
   const busiestMetaEl = document.getElementById("insight-busiest-meta");
   const noPlateEl = document.getElementById("insight-no-plate");
   const noPlateMetaEl = document.getElementById("insight-no-plate-meta");
+  const topManualIpEl = document.getElementById("insight-top-manual-ip");
+  const topManualIpMetaEl = document.getElementById("insight-top-manual-ip-meta");
+  const lastOpenEl = document.getElementById("insight-last-open");
+  const lastOpenMetaEl = document.getElementById("insight-last-open-meta");
+  const healthDiskEl = document.getElementById("health-disk-free");
+  const healthDiskMetaEl = document.getElementById("health-disk-meta");
+  const healthTempEl = document.getElementById("health-temp");
+  const healthTempMetaEl = document.getElementById("health-temp-meta");
+  const healthMaintenanceEl = document.getElementById("health-maintenance");
+  const healthMaintenanceMetaEl = document.getElementById("health-maintenance-meta");
+  const healthFailuresEl = document.getElementById("health-failures");
+  const healthFailuresMetaEl = document.getElementById("health-failures-meta");
   const chart = document.getElementById("stats-chart");
   const chartLabel = document.getElementById("chart-label");
   const donutEl = document.getElementById("stats-donut");
@@ -1970,23 +2138,41 @@ async function initStats() {
     });
   };
 
+  const formatBytes = (value) => {
+    if (!Number.isFinite(value) || value < 0) return "--";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let size = value;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit += 1;
+    }
+    return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+  };
+
   const loadStats = async (windowKey) => {
     setStatus("Loading stats...");
-    const [statsRes, insightsRes] = await Promise.all([
+    const [statsRes, insightsRes, healthRes] = await Promise.all([
       fetch(`/api/stats?window=${windowKey}`),
       fetch(`/api/stats/insights?window=${windowKey}`),
+      fetch("/api/service-health"),
     ]);
     const data = await statsRes.json();
     const insightsData = await insightsRes.json();
+    const healthData = await healthRes.json();
     totalEl.textContent = coalesce(data.total, "--");
     const recognisedCount = Number(data.counts.recognised || 0);
     const unmatchedCount = Number(data.counts.unmatched || 0) + Number(data.counts.candidate || 0);
+    const manualOpenCount = Number(data.counts.manual_open || 0);
     recEl.textContent = recognisedCount;
     unmatchEl.textContent = unmatchedCount;
+    if (gateOpensEl) gateOpensEl.textContent = Number(data.gate_opens || 0);
+    if (manualOpensEl) manualOpensEl.textContent = manualOpenCount;
     const total = Number(data.total || 0);
     const recognised = Number(data.counts.recognised || 0);
+    const anprTotal = recognisedCount + unmatchedCount;
     if (hitRateEl) {
-      hitRateEl.textContent = total ? `${((recognised / total) * 100).toFixed(1)}%` : "--";
+      hitRateEl.textContent = anprTotal ? `${((recognised / anprTotal) * 100).toFixed(1)}%` : "--";
     }
     const insights = insightsData && insightsData.insights ? insightsData.insights : {};
     const avgProcessing = insights.avg_processing_ms
@@ -2027,7 +2213,62 @@ async function initStats() {
     if (noPlateEl && noPlateMetaEl) {
       const noPlate = Number(insights.no_plate || 0);
       noPlateEl.textContent = Number.isFinite(noPlate) ? String(noPlate) : "--";
-      noPlateMetaEl.textContent = total ? `${((noPlate / total) * 100).toFixed(1)}% of events` : "--";
+      noPlateMetaEl.textContent = anprTotal
+        ? `${((noPlate / anprTotal) * 100).toFixed(1)}% of ANPR reads`
+        : "--";
+    }
+    if (topManualIpEl && topManualIpMetaEl) {
+      const topManual = (insights.top_manual_ips || [])[0] || {};
+      topManualIpEl.textContent = topManual.request_ip || "--";
+      topManualIpMetaEl.textContent = topManual.count ? `${topManual.count} manual opens` : "No manual opens";
+    }
+    if (lastOpenEl && lastOpenMetaEl) {
+      const latestOpen = insights.latest_gate_open || {};
+      lastOpenEl.textContent = latestOpen.captured_at
+        ? formatDayTimeLabel(latestOpen.captured_at)
+        : "--";
+      if (latestOpen.kind === "manual_open") {
+        lastOpenMetaEl.textContent = latestOpen.request_ip
+          ? `Manual open from ${latestOpen.request_ip}`
+          : "Manual open";
+      } else if (latestOpen.captured_at) {
+        lastOpenMetaEl.textContent = `${latestOpen.kind || "gate open"} • ${formatRelative(latestOpen.captured_at)}`;
+      } else {
+        lastOpenMetaEl.textContent = "No gate opens";
+      }
+    }
+    if (healthDiskEl && healthDiskMetaEl) {
+      const disk = healthData.disk || {};
+      healthDiskEl.textContent = Number.isFinite(disk.free_pct) ? `${disk.free_pct.toFixed(1)}%` : "--";
+      healthDiskMetaEl.textContent = Number.isFinite(disk.free_bytes)
+        ? `${formatBytes(disk.free_bytes)} free`
+        : "--";
+    }
+    if (healthTempEl && healthTempMetaEl) {
+      healthTempEl.textContent = Number.isFinite(healthData.temperature_c)
+        ? `${healthData.temperature_c.toFixed(1)}C`
+        : "--";
+      const services = healthData.services || {};
+      healthTempMetaEl.textContent = `web:${services.gate_anpr_web || "?"} worker:${services.gate_anpr || "?"} alprd:${services.alprd || "?"}`;
+    }
+    if (healthMaintenanceEl && healthMaintenanceMetaEl) {
+      const maintenance = healthData.maintenance || {};
+      healthMaintenanceEl.textContent = maintenance.last_success
+        ? maintenance.stale
+          ? "Stale"
+          : "OK"
+        : "--";
+      if (maintenance.last_success) {
+        const age = Number.isFinite(maintenance.age_hours) ? `${maintenance.age_hours}h ago` : maintenance.last_success;
+        healthMaintenanceMetaEl.textContent = `Last prune ${age}`;
+      } else {
+        healthMaintenanceMetaEl.textContent = maintenance.last_error || "No successful maintenance run";
+      }
+    }
+    if (healthFailuresEl && healthFailuresMetaEl) {
+      const failed = Array.isArray(healthData.failed_units) ? healthData.failed_units : [];
+      healthFailuresEl.textContent = String(failed.length);
+      healthFailuresMetaEl.textContent = failed.length ? failed.join(", ") : "No failed units";
     }
     renderDonut(recognisedCount, unmatchedCount);
     renderCloud(cloudRecognised, insights.top_recognised_list || []);
@@ -2062,7 +2303,7 @@ async function initStats() {
   if (busiestCard) {
     busiestCard.addEventListener("click", () => {
       setActiveTab("timeline");
-      fetchTimeline({ reset: true });
+      fetchTimeline({ page: 1 });
     });
   }
 
@@ -2075,7 +2316,7 @@ async function initStats() {
   resizeCanvas();
   window.addEventListener("resize", () => {
     resizeCanvas();
-    const active = document.querySelector(".chip.active");
+    const active = document.querySelector("#tab-stats .chip.active");
     if (active) {
       loadStats(active.dataset.window);
     }
@@ -2088,7 +2329,7 @@ async function initStats() {
     const x = event.clientX - rect.left;
     const containerWidth = chart.width;
     const padding = 24;
-    const active = document.querySelector(".chip.active");
+    const active = document.querySelector("#tab-stats .chip.active");
     if (!active) return;
     fetch(`/api/stats?window=${active.dataset.window}`)
       .then((resp) => resp.json())

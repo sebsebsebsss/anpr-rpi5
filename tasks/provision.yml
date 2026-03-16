@@ -105,6 +105,14 @@
   tags:
     - provision
 
+- name: Grant pi user access to systemd journal
+  user:
+    name: pi
+    groups: systemd-journal
+    append: true
+  tags:
+    - provision
+
 - name: Check for existing alprd binary
   stat:
     path: "{{ alprd_bin }}"

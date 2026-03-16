@@ -9,6 +9,16 @@
   tags:
     - deploy
 
+- name: Ensure application log directory exists
+  file:
+    path: /var/log/gate-anpr
+    state: directory
+    owner: pi
+    group: pi
+    mode: "0755"
+  tags:
+    - deploy
+
 - name: Install monthly plate purge cron (older than 180 days)
   cron:
     name: "Purge old plate images"
@@ -20,24 +30,44 @@
   tags:
     - deploy
 
-- name: Install monthly system log purge cron (older than 180 days)
+- name: Remove legacy monthly system log purge cron
   cron:
     name: "Purge old system logs"
     user: root
-    minute: "37"
-    hour: "3"
-    day: "1"
-    job: "journalctl --vacuum-time=180d >/dev/null 2>&1"
+    state: absent
   tags:
     - deploy
 
-- name: Install daily events DB purge cron (older than 30 days)
+- name: Remove legacy direct SQLite purge cron
   cron:
     name: "Purge old plate events"
     user: pi
-    minute: "27"
-    hour: "3"
-    job: "sqlite3 /opt/gate_anpr/events.db \"DELETE FROM events WHERE captured_at < datetime('now','-30 days'); VACUUM;\""
+    state: absent
+  tags:
+    - deploy
+
+- name: Ensure journald drop-in directory exists
+  file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - deploy
+
+- name: Install journald retention config for gate ANPR host
+  copy:
+    dest: /etc/systemd/journald.conf.d/gate-anpr.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Journal]
+      SystemMaxUse=200M
+      SystemMaxFileSize=25M
+      MaxRetentionSec=180day
+  notify: restart systemd-journald
   tags:
     - deploy
 
@@ -92,6 +122,30 @@
   tags:
     - deploy
 
+- name: Copy shared runtime helpers
+  copy:
+    src: files/gate_runtime.py
+    dest: "{{ app_dir }}/gate_runtime.py"
+    owner: pi
+    group: pi
+    mode: "0755"
+  notify:
+    - restart gate_anpr
+    - restart gate_anpr_web
+  tags:
+    - deploy
+    - web
+
+- name: Copy maintenance helper
+  copy:
+    src: files/gate_maintenance.py
+    dest: "{{ app_dir }}/gate_maintenance.py"
+    owner: pi
+    group: pi
+    mode: "0755"
+  tags:
+    - deploy
+
 - name: Copy web app backend
   copy:
     src: files/web/app.py
@@ -139,6 +193,8 @@
 
 - name: Load gate_anpr env overrides for web stream
   set_fact:
+    gate_web_port: "{{ lookup('ini', 'GATE_WEB_PORT type=properties file=' ~ gate_anpr_env_path, default=gate_web_port) }}"
+    gate_api_shared_secret: "{{ lookup('ini', 'GATE_API_SHARED_SECRET type=properties file=' ~ gate_anpr_env_path, default=gate_api_shared_secret) }}"
     gate_web_stream_url: "{{ lookup('ini', 'GATE_WEB_STREAM_URL type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_url) }}"
     gate_web_stream_rtsp_url: "{{ lookup('ini', 'GATE_WEB_STREAM_RTSP_URL type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_rtsp_url) }}"
     gate_web_stream_fps: "{{ lookup('ini', 'GATE_WEB_STREAM_FPS type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_fps) }}"
@@ -230,6 +286,26 @@
       - requests
       - greenstalk
       - flask
+  tags:
+    - deploy
+
+- name: Install daily gate maintenance cron
+  cron:
+    name: "Gate ANPR maintenance"
+    user: pi
+    minute: "27"
+    hour: "3"
+    job: "{{ venv_path }}/bin/python {{ app_dir }}/gate_maintenance.py --db-path {{ app_dir }}/events.db --retention-days 30"
+  tags:
+    - deploy
+
+- name: Ensure gate maintenance log file exists
+  file:
+    path: /var/log/gate-anpr/gate-maintenance.log
+    state: touch
+    owner: pi
+    group: pi
+    mode: "0644"
   tags:
     - deploy
 
@@ -518,6 +594,69 @@
   tags:
     - deploy
     - web
+
+- name: Wait for web UI port to accept connections
+  wait_for:
+    host: 127.0.0.1
+    port: "{{ gate_web_port | int }}"
+    timeout: 20
+  tags:
+    - deploy
+    - web
+
+- name: Smoke check web health endpoint
+  uri:
+    url: "http://127.0.0.1:{{ gate_web_port }}/api/healthz"
+    headers: "{{ {'X-Gate-Api-Secret': gate_api_shared_secret} if gate_api_shared_secret | length > 0 else {} }}"
+    status_code: 200
+  register: gate_web_health
+  retries: 5
+  delay: 2
+  until: gate_web_health.status == 200 and gate_web_health.json.ok
+  tags:
+    - deploy
+    - web
+
+- name: Smoke check main UI entrypoint
+  uri:
+    url: "http://127.0.0.1:{{ gate_web_port }}/"
+    status_code: 200
+  register: gate_web_index
+  tags:
+    - deploy
+    - web
+
+- name: Record maintenance log timestamp before smoke check
+  stat:
+    path: /var/log/gate-anpr/gate-maintenance.log
+  register: gate_maintenance_log_before
+  tags:
+    - deploy
+
+- name: Run maintenance smoke check
+  command: >
+    {{ venv_path }}/bin/python {{ app_dir }}/gate_maintenance.py
+    --db-path {{ app_dir }}/events.db
+    --retention-days 30
+  become_user: pi
+  changed_when: false
+  tags:
+    - deploy
+
+- name: Read maintenance log tail after smoke check
+  command: tail -n 20 /var/log/gate-anpr/gate-maintenance.log
+  register: gate_maintenance_log_tail
+  changed_when: false
+  tags:
+    - deploy
+
+- name: Verify maintenance smoke check logged success
+  assert:
+    that:
+      - "'Pruned' in gate_maintenance_log_tail.stdout"
+    fail_msg: "Gate maintenance smoke check did not log a prune result."
+  tags:
+    - deploy
 
 - name: Verify alprd binary exists
   command: "{{ alprd_bin }} --version"
