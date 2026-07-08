@@ -225,8 +225,10 @@ LOG_RANGE_MAP = {
 
 
 @app.after_request
-def add_no_cache_headers(response):
+def add_cache_headers(response):
     if request.path.startswith("/images/"):
+        # Plate JPEGs are content-addressed by timestamp — they never change.
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -1317,14 +1319,20 @@ def healthz():
         "gate_anpr_web": _systemctl_is_active("gate_anpr_web"),
     }
     ok = db_ok and allowlist_ok and services["gate_anpr_web"] == "active"
+    maint = _maintenance_health()
     return jsonify(
         {
             "ok": ok,
             "db": {"ok": db_ok, "error": db_error},
-            "allowlist": {"ok": allowlist_ok, "path": ALLOWLIST_PATH},
+            "allowlist": {"ok": allowlist_ok},
             "stream": {"exists": stream_exists},
             "services": services,
-            "maintenance": _maintenance_health(),
+            "maintenance": {
+                "last_success": maint.get("last_success"),
+                "age_hours": maint.get("age_hours"),
+                "stale": maint.get("stale"),
+                "last_error": maint.get("last_error"),
+            },
         }
     ), (200 if ok else 503)
 
