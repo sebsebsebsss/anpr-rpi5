@@ -218,6 +218,12 @@ def sqlite_healthcheck(db_path):
         conn.close()
 
 
+# Relay polarity constants — HIGH activates the relay (closes the gate contact).
+# Change these two lines if your relay board is wired active-LOW.
+RELAY_ON = 1   # GPIO.HIGH
+RELAY_OFF = 0  # GPIO.LOW
+
+
 def open_gate(board_pin, bcm_pin, logger):
     logger.debug("GPIO setup: mode=BOARD pin=%s", board_pin)
     try:
@@ -226,10 +232,12 @@ def open_gate(board_pin, bcm_pin, logger):
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BOARD)
         GPIO.setup(board_pin, GPIO.OUT)
-        GPIO.output(board_pin, GPIO.HIGH)
-        time.sleep(0.5)
-        GPIO.output(board_pin, GPIO.LOW)
-        GPIO.cleanup()
+        try:
+            GPIO.output(board_pin, RELAY_ON)
+            time.sleep(0.5)
+        finally:
+            GPIO.output(board_pin, RELAY_OFF)
+            GPIO.cleanup()
         return
     except RuntimeError as exc:
         logger.warning("RPi.GPIO failed (%s). Falling back to lgpio BCM %s", exc, bcm_pin)
@@ -242,9 +250,9 @@ def open_gate(board_pin, bcm_pin, logger):
 
     handle = lgpio.gpiochip_open(0)
     try:
-        lgpio.gpio_claim_output(handle, bcm_pin, 0)
-        lgpio.gpio_write(handle, bcm_pin, 1)
+        lgpio.gpio_claim_output(handle, bcm_pin, RELAY_OFF)
+        lgpio.gpio_write(handle, bcm_pin, RELAY_ON)
         time.sleep(0.5)
-        lgpio.gpio_write(handle, bcm_pin, 0)
+        lgpio.gpio_write(handle, bcm_pin, RELAY_OFF)
     finally:
         lgpio.gpiochip_close(handle)
