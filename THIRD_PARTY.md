@@ -1,6 +1,7 @@
 # Third-party licences
 
-This project links against and ships with the following third-party software.
+This project's own code is released into the public domain (see LICENSE / The Unlicense).
+It links against and ships with the following third-party software.
 
 ## System packages (installed by Ansible)
 
