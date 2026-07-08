@@ -47,6 +47,26 @@ flowchart LR
 - Relay board wired to your existing gate/garage controller
 - IP camera with stable RTSP stream (>99% success rate on dome camera with manual shutter speed, night time IR and mechanical zoom - Annke CZ804)
 
+## Hardware wiring
+
+```
+Pi GPIO (physical BOARD pin 23 / BCM pin 11)
+  → Relay board IN signal (active-HIGH: Pi HIGH closes relay contact)
+Relay COM → Gate controller trigger terminal
+Relay NO  → Gate controller trigger terminal (normally-open contact)
+```
+
+Relay polarity: the code pulses the GPIO **HIGH for 500 ms** then returns it **LOW**. With a standard active-HIGH relay board this closes the normally-open contact for 500 ms — a momentary trigger the gate controller treats as a "open" command. If your relay is active-LOW, change `RELAY_ON = 1` and `RELAY_OFF = 0` in `files/gate_runtime.py` to `0` and `1` respectively.
+
+Default GPIO pins (overridable via env):
+
+| Env var | Default | Notes |
+|---|---|---|
+| `GATE_PIN_BOARD` | 23 | Physical BOARD numbering used by RPi.GPIO |
+| `GATE_PIN_BCM` | 11 | BCM numbering used by lgpio fallback |
+
+BOARD pin 23 = BCM pin 11 on Raspberry Pi 4/5.
+
 ## Software requirements
 - Ansible installed on your controller machine
 - SSH access to the Pi
@@ -67,6 +87,8 @@ GATE_ANPR_DEBUG=0
 PLATE_ALLOWLIST_PATH=/opt/gate_anpr/allowlist.json
 GATE_PIN_BOARD=23
 GATE_PIN_BCM=11
+# Required — generate with: openssl rand -hex 32
+GATE_API_SHARED_SECRET=<generate-with-openssl-rand-hex-32>
 ```
 
 Optional values:
@@ -78,11 +100,15 @@ MATCH_DEDUP_SECONDS=60
 FUZZY_ALLOWLIST=1
 FUZZY_MAX_DISTANCE=1
 FUZZY_MIN_CONFIDENCE=75
-GATE_API_SHARED_SECRET=change-me
 GATE_WEB_STREAM_URL=/static/stream.jpg
 GATE_WEB_STREAM_FPS=12.5
 GATE_WEB_STREAM_WIDTH=1280
 GATE_WEB_STREAM_HEIGHT=720
+# Comma-separated origins allowed to call mutating API endpoints (default shown)
+GATE_ALLOWED_ORIGINS=http://gatepi5,http://gatepi5.local
+# Override lat/lon for sunrise/sunset calculations (falls back to system timezone centroid)
+GATE_UI_LAT=54.0
+GATE_UI_LON=-2.0
 ```
 
 If `PUSHOVER_USER_KEY` and `PUSHOVER_APP_TOKEN` are omitted, deploy still works; notifications are just disabled.
