@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import types
 
 # Ensure files/ and files/web/ are on the path so imports work without the Pi.
 _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,8 +23,6 @@ os.environ.setdefault("GATE_API_SHARED_SECRET", "test-secret-for-ci")
 os.environ.setdefault("GATE_ALLOWED_ORIGINS", "http://localhost,http://gatepi5")
 
 # Stub out RPi.GPIO so tests run on any platform.
-import types
-
 gpio_mod = types.ModuleType("RPi")
 gpio_inner = types.ModuleType("RPi.GPIO")
 gpio_inner.BOARD = "BOARD"

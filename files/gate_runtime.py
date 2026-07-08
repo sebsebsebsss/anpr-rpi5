@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-import logging
-from logging.handlers import RotatingFileHandler
 import json
+import logging
 import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 
 
 def env_int(name, default, logger_name="gate_runtime"):

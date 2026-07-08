@@ -136,6 +136,17 @@
     - deploy
     - web
 
+- name: Copy allowlist utility (normalise_plate helper)
+  copy:
+    src: files/allowlist_util.py
+    dest: "{{ app_dir }}/allowlist_util.py"
+    owner: pi
+    group: pi
+    mode: "0755"
+  notify: restart gate_anpr
+  tags:
+    - deploy
+
 - name: Copy maintenance helper
   copy:
     src: files/gate_maintenance.py
@@ -153,6 +164,18 @@
     owner: pi
     group: pi
     mode: "0755"
+  notify: restart gate_anpr_web
+  tags:
+    - deploy
+    - web
+
+- name: Copy timezone centroids helper
+  copy:
+    src: files/web/tz_centroids.py
+    dest: "{{ app_dir }}/web/tz_centroids.py"
+    owner: pi
+    group: pi
+    mode: "0644"
   notify: restart gate_anpr_web
   tags:
     - deploy
@@ -216,6 +239,35 @@
     - restart gate_anpr
     - restart gate_anpr_web
     - restart gate_anpr_stream_jpeg
+  tags:
+    - deploy
+
+- name: Ensure /etc/gate_anpr.env exists on Pi
+  file:
+    path: /etc/gate_anpr.env
+    state: touch
+    owner: root
+    group: root
+    mode: "0600"
+  changed_when: false
+  tags:
+    - deploy
+
+- name: Check whether GATE_API_SHARED_SECRET is already set in remote env
+  shell: grep -c '^GATE_API_SHARED_SECRET=.\+' /etc/gate_anpr.env || true
+  register: secret_check
+  changed_when: false
+  tags:
+    - deploy
+
+- name: Generate and persist GATE_API_SHARED_SECRET when absent
+  shell: |
+    SECRET=$(openssl rand -hex 32)
+    echo "GATE_API_SHARED_SECRET=${SECRET}" >> /etc/gate_anpr.env
+  when: secret_check.stdout | trim == "0"
+  notify:
+    - restart gate_anpr
+    - restart gate_anpr_web
   tags:
     - deploy
 

@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
+import fcntl
 import hmac
 import json
-import logging
 import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from html import escape
-from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, request, send_from_directory
-import time
-import sqlite3
-import fcntl
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -23,16 +22,16 @@ ROOT_DIR = os.path.dirname(APP_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from gate_runtime import (
+from gate_runtime import (  # noqa: E402
     configure_logging,
     env_int,
     init_events_db,
     insert_event,
     now_local_str,
-    open_gate as trigger_gate,
     parse_local_timestamp,
     sqlite_healthcheck,
 )
+from gate_runtime import open_gate as trigger_gate  # noqa: E402
 
 ALLOWLIST_PATH = os.getenv("PLATE_ALLOWLIST_PATH", "/opt/gate_anpr/allowlist.json")
 LOG_PATH = "/var/log/gate-anpr/gate_anpr_web.log"
@@ -123,14 +122,14 @@ def _sunrise_sunset_utc(day, latitude, longitude):
         lng_hour = longitude / 15.0
         t = day.timetuple().tm_yday + ((6 - lng_hour) / 24 if is_sunrise else (18 - lng_hour) / 24)
         m = (0.9856 * t) - 3.289
-        l = m + (1.916 * math.sin(math.radians(m))) + (0.020 * math.sin(math.radians(2 * m))) + 282.634
-        l = (l + 360) % 360
-        ra = math.degrees(math.atan(0.91764 * math.tan(math.radians(l))))
+        elon = m + (1.916 * math.sin(math.radians(m))) + (0.020 * math.sin(math.radians(2 * m))) + 282.634
+        elon = (elon + 360) % 360
+        ra = math.degrees(math.atan(0.91764 * math.tan(math.radians(elon))))
         ra = (ra + 360) % 360
-        l_quadrant = (math.floor(l / 90)) * 90
+        l_quadrant = (math.floor(elon / 90)) * 90
         ra_quadrant = (math.floor(ra / 90)) * 90
         ra = (ra + (l_quadrant - ra_quadrant)) / 15
-        sin_dec = 0.39782 * math.sin(math.radians(l))
+        sin_dec = 0.39782 * math.sin(math.radians(elon))
         cos_dec = math.cos(math.asin(sin_dec))
         cos_h = (
             (math.cos(math.radians(90.833)) - (sin_dec * math.sin(math.radians(latitude))))

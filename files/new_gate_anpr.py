@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 ## Version 0.4 – Python 3 refactor (behaviour unchanged)
 
+import json
 import os
 import re
-import sys
 import signal
-import traceback
+import sys
 import time
-import json
-import requests
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from time import gmtime, strftime
 
-_SAFE_UUID = re.compile(r'^[A-Za-z0-9\-]+$')
-
 import greenstalk
-from gate_runtime import configure_logging, env_int, init_events_db, insert_event, open_gate
+import requests
 from allowlist_util import normalise_plate
+from gate_runtime import configure_logging, env_int, init_events_db, insert_event, open_gate
 
+_SAFE_UUID = re.compile(r"^[A-Za-z0-9\-]+$")
 
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
@@ -333,7 +332,7 @@ def consumer_main(client):
             # Do the thing if plate is recent, valid and hasn't already been recently seen
             if min_time > time.time():
                 matched = False
-                matched_plate = None
+                _matched_plate = None
                 for cand in candidates:
                     number_plate = cand["plate"]
                     norm_plate = normalise_plate(number_plate)
@@ -358,7 +357,7 @@ def consumer_main(client):
                         last_seen_reg = match_plate
                         last_seen_allowed[match_plate] = now
                         matched = True
-                        matched_plate = match_plate
+                        _matched_plate = match_plate
                         if fuzzy_match:
                             log.info(
                                 "Fuzzy allowlist match: %s -> %s (dist=%s). Opening gate",

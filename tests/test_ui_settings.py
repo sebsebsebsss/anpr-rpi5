@@ -1,8 +1,7 @@
 """Tests for lat/lon resolution in /api/ui-settings."""
-import os
-import sys
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +19,7 @@ def _resolve(monkeypatch, lat=None, lon=None, tz="Europe/London"):
 
     with patch("app._get_timezone_name", return_value=tz):
         import importlib
+
         import app
         importlib.reload(app)
         return app._resolve_lat_lon()
@@ -34,6 +34,7 @@ def test_env_vars_take_precedence(monkeypatch):
 
 def test_timezone_centroid_fallback(monkeypatch):
     import importlib
+
     import app
     importlib.reload(app)
     with patch("app._get_timezone_name", return_value="Europe/London"):
@@ -45,6 +46,7 @@ def test_timezone_centroid_fallback(monkeypatch):
 
 def test_unknown_timezone_returns_null(monkeypatch):
     import importlib
+
     import app
     importlib.reload(app)
     with patch("app._get_timezone_name", return_value="Mars/Olympus_Mons"):

@@ -1,7 +1,4 @@
 """Tests for the /api/logs service-name whitelist."""
-import os
-import sys
-import pytest
 
 
 def _get_log_service_map():

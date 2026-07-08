@@ -1,6 +1,4 @@
 """Tests for the Origin/Referer CSRF check and shared-secret auth."""
-import os
-import sys
 import pytest
 
 

@@ -1,8 +1,7 @@
 """GPIO try/finally invariant: RELAY_OFF is always written, even when an
 exception fires between activate and release."""
-import time
 import unittest
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 import gate_runtime as gr
 
@@ -34,6 +33,7 @@ class TestRelayTryFinally(unittest.TestCase):
         gpio, calls = self._make_gpio()
         with patch.dict("sys.modules", {"RPi.GPIO": gpio, "RPi": type("M", (), {"GPIO": gpio})()}):
             import importlib
+
             import gate_runtime
             importlib.reload(gate_runtime)
 
@@ -48,6 +48,7 @@ class TestRelayTryFinally(unittest.TestCase):
         """RELAY_OFF must be written in the finally block even when an
         exception fires immediately after RELAY_ON (simulating OOM/kill)."""
         import logging
+
         import gate_runtime as gr2
         logger = logging.getLogger("test")
 

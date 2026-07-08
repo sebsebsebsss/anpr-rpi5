@@ -17,8 +17,8 @@ def main():
         log_path="/var/log/gate-anpr/gate-maintenance.log",
     )
     if args.dry_run:
-        from datetime import datetime, timedelta
         import sqlite3
+        from datetime import datetime, timedelta
         cutoff = (datetime.utcnow() - timedelta(days=args.retention_days)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
