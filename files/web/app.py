@@ -114,20 +114,8 @@ def _get_timezone_name():
 
 
 def _timezone_location(timezone_name):
-    locations = {
-        "Europe/London": (51.5074, -0.1278),
-        "Europe/Dublin": (53.3498, -6.2603),
-        "Europe/Paris": (48.8566, 2.3522),
-        "Europe/Berlin": (52.5200, 13.4050),
-        "America/New_York": (40.7128, -74.0060),
-        "America/Chicago": (41.8781, -87.6298),
-        "America/Denver": (39.7392, -104.9903),
-        "America/Los_Angeles": (34.0522, -118.2437),
-        "Asia/Singapore": (1.3521, 103.8198),
-        "Asia/Tokyo": (35.6762, 139.6503),
-        "Australia/Sydney": (-33.8688, 151.2093),
-    }
-    return locations.get(timezone_name, locations["Europe/London"])
+    from tz_centroids import TZ_CENTROIDS
+    return TZ_CENTROIDS.get(timezone_name)
 
 
 def _sunrise_sunset_utc(day, latitude, longitude):
@@ -162,6 +150,25 @@ def _sunrise_sunset_utc(day, latitude, longitude):
     return _calc(True), _calc(False)
 
 
+def _resolve_lat_lon():
+    """Three-tier lat/lon resolution: env vars → timezone centroid → None."""
+    env_lat = os.getenv("GATE_UI_LAT", "").strip()
+    env_lon = os.getenv("GATE_UI_LON", "").strip()
+    if env_lat and env_lon:
+        try:
+            return float(env_lat), float(env_lon), "env"
+        except ValueError:
+            log.warning("Invalid GATE_UI_LAT/LON values: %r %r; falling back to tz centroid", env_lat, env_lon)
+
+    tz_name = _get_timezone_name()
+    centroid = _timezone_location(tz_name)
+    if centroid is not None:
+        return centroid[0], centroid[1], "tz_centroid"
+
+    log.info("No lat/lon available (env unset, timezone %r not in centroid dict)", tz_name)
+    return None, None, None
+
+
 def _sun_times_payload():
     tz_name = _get_timezone_name()
     try:
@@ -169,7 +176,18 @@ def _sun_times_payload():
     except Exception:
         tz_name = "UTC"
         tz = ZoneInfo(tz_name)
-    lat, lon = _timezone_location(tz_name)
+    lat, lon, lat_source = _resolve_lat_lon()
+    if lat is None or lon is None:
+        return {
+            "timezone": tz_name,
+            "lat": None,
+            "lon": None,
+            "lat_source": None,
+            "sunrise_ts": None,
+            "sunset_ts": None,
+            "sunrise_next_ts": None,
+            "sunset_next_ts": None,
+        }
     today = datetime.now(tz).date()
     tomorrow = today + timedelta(days=1)
     sunrise_today, sunset_today = _sunrise_sunset_utc(today, lat, lon)
@@ -178,6 +196,7 @@ def _sun_times_payload():
         "timezone": tz_name,
         "lat": lat,
         "lon": lon,
+        "lat_source": lat_source,
         "sunrise_ts": int(sunrise_today.timestamp()) if sunrise_today else None,
         "sunset_ts": int(sunset_today.timestamp()) if sunset_today else None,
         "sunrise_next_ts": int(sunrise_tomorrow.timestamp()) if sunrise_tomorrow else None,
