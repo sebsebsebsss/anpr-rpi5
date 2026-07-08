@@ -1,30 +1,47 @@
 ---
 - name: Check for local OpenALPR test image
   stat:
-    path: "{{ openalpr_test_image_path | default('tests/Test Image.png') }}"
+    path: "{{ openalpr_test_image_path | default('', true) }}"
   delegate_to: localhost
   become: false
   run_once: true
   register: openalpr_test_image
-  when: run_openalpr_smoketest | bool
+  when:
+    - run_openalpr_smoketest | bool
+    - (openalpr_test_image_path | default('', true)) | length > 0
+  tags:
+    - test
+
+- name: Fail if smoketest requested without an explicit test image
+  fail:
+    msg: "OpenALPR smoketest requested; set openalpr_test_image_path to a local image containing a readable plate."
+  when:
+    - run_openalpr_smoketest | bool
+    - (openalpr_test_image_path | default('', true)) | length == 0
   tags:
     - test
 
 - name: Fail if smoketest requested but test image is missing
   fail:
-    msg: "OpenALPR smoketest requested but {{ openalpr_test_image_path | default('tests/Test Image.png') }} is missing."
-  when: run_openalpr_smoketest | bool and (not openalpr_test_image.stat.exists)
+    msg: "OpenALPR smoketest requested but {{ openalpr_test_image_path }} is missing."
+  when:
+    - run_openalpr_smoketest | bool
+    - (openalpr_test_image_path | default('', true)) | length > 0
+    - not openalpr_test_image.stat.exists
   tags:
     - test
 
 - name: Copy OpenALPR test image
   copy:
-    src: "{{ openalpr_test_image_path | default('tests/Test Image.png') }}"
+    src: "{{ openalpr_test_image_path }}"
     dest: /tmp/openalpr_test.png
     owner: root
     group: root
     mode: "0644"
-  when: run_openalpr_smoketest | bool and openalpr_test_image.stat.exists
+  when:
+    - run_openalpr_smoketest | bool
+    - (openalpr_test_image_path | default('', true)) | length > 0
+    - openalpr_test_image.stat.exists
   tags:
     - test
 
@@ -32,13 +49,16 @@
   command: alpr -c eu -n 10 /tmp/openalpr_test.png
   register: openalpr_smoketest
   changed_when: false
-  when: run_openalpr_smoketest | bool and openalpr_test_image.stat.exists
+  when:
+    - run_openalpr_smoketest | bool
+    - (openalpr_test_image_path | default('', true)) | length > 0
+    - openalpr_test_image.stat.exists
   tags:
     - test
 
 - name: Fail if smoketest finds no plates
   fail:
-    msg: "OpenALPR smoketest failed: no plates detected in {{ openalpr_test_image_path | default('tests/Test Image.png') }}."
+    msg: "OpenALPR smoketest failed: no plates detected in {{ openalpr_test_image_path }}."
   when: run_openalpr_smoketest | bool and ('No license plates found.' in openalpr_smoketest.stdout)
   tags:
     - test

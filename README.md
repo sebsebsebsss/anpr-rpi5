@@ -45,7 +45,9 @@ flowchart LR
 ## Hardware requirements
 - Raspberry Pi 5 (8GB proven, 4GB likely to work)
 - Relay board wired to your existing gate/garage controller
-- IP camera with stable RTSP stream (>99% success rate on dome camera with manual shutter speed, night time IR and mechanical zoom - Annke CZ804)
+- IP camera with a stable RTSP stream. A clear, close plate view matters more than
+  the exact model; the tested setup used an Annke CZ804 with manual shutter speed,
+  night-time IR, and optical/mechanical zoom.
 
 ## Hardware wiring
 
@@ -73,12 +75,24 @@ BOARD pin 23 = BCM pin 11 on Raspberry Pi 4/5.
 - Pi reachable on your LAN
 - Outbound internet access on first provision for `apt` packages and, if needed, an OpenALPR source clone
 
+## Fresh Pi prep
+Before running Ansible, start from a Pi that you can already administer:
+
+- Install Raspberry Pi OS Lite 64-bit based on Debian Trixie.
+- Enable SSH and give the Pi a fixed DHCP lease or otherwise known LAN IP.
+- Confirm you can SSH from the controller machine: `ssh pi@<pi-ip>`.
+- Confirm the SSH user can use `sudo`; put that password in `ansible.env`.
+- Confirm your camera RTSP URL works from the LAN, for example with VLC or `ffmpeg`.
+
 ## Configure secrets
 App settings live in a local file (gitignored):
 
 ```sh
 cp files/gate_anpr.env.example files/gate_anpr.env
 ```
+
+Only commit the `.example` files. The real env, inventory, and allowlist files are
+ignored by git.
 
 Required values in `files/gate_anpr.env`:
 
@@ -103,9 +117,14 @@ FUZZY_ALLOWLIST=1
 FUZZY_MAX_DISTANCE=1
 FUZZY_MIN_CONFIDENCE=75
 GATE_WEB_STREAM_URL=/static/stream.jpg
+# Optional: use a different stream for the web preview. Defaults to ALPRD_STREAM.
+# GATE_WEB_STREAM_RTSP_URL=rtsp://user:pass@camera-ip:554/h264Preview_01_sub
 GATE_WEB_STREAM_FPS=12.5
 GATE_WEB_STREAM_WIDTH=1280
 GATE_WEB_STREAM_HEIGHT=720
+# If you change the nginx listen port, set this to the same public port for
+# Ansible smoke checks.
+# GATE_WEB_PORT=80
 # Extra origins allowed to call mutating API endpoints, on top of the
 # automatic same-origin check (only needed for unusual proxy setups)
 GATE_ALLOWED_ORIGINS=
@@ -140,7 +159,6 @@ cp ansible.env.example ansible.env
 Fill in:
 
 ```ini
-GATEPI_HOST=192.168.x.x
 GATEPI_USER=pi
 ANSIBLE_BECOME_PASSWORD=...
 ALPRD_STREAM=rtsp://user:pass@camera-ip:554/h264Preview_01_main
@@ -152,7 +170,15 @@ Useful optional values from `ansible.env.example`:
 ALPRD_CPU_AFFINITY=
 ALPRD_ROI=1,208,2092,888
 GATEPI_ALIAS_HOSTNAME=gate
+OPENALPR_SHA=HEAD
 ```
+
+`ALPRD_STREAM` is the stream OpenALPR reads for recognition. If you want the UI
+to use a lower-resolution stream, set `GATE_WEB_STREAM_RTSP_URL` in
+`files/gate_anpr.env`; otherwise the UI stream reuses `ALPRD_STREAM`.
+
+For repeatable OpenALPR source builds, replace `OPENALPR_SHA=HEAD` with a
+specific commit SHA.
 
 ## Inventory
 `site.yml` targets host group `gatepi`.
@@ -161,6 +187,13 @@ Create inventory:
 
 ```sh
 cp inventory.ini.example inventory.ini
+```
+
+Edit `inventory.ini` and replace `192.168.x.x` with the Pi's LAN IP:
+
+```ini
+[gatepi]
+192.168.x.x
 ```
 
 If you want custom host groups, map them under `gatepi` using children.
@@ -200,15 +233,10 @@ ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site.yml --tags
 
 ## Optional test workflows
 Tests are split from the main deployment playbook.
-Load `ansible.env` first as above. The smoketest uses `tests/Test Image.png` by default.
+Load `ansible.env` first as above.
 
-OpenALPR smoketest:
-
-```sh
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_openalpr_smoketest=true
-```
-
-Use a different local test image:
+OpenALPR smoketest, using a local image that contains a readable plate. Real
+plate images are not committed to this repo for privacy:
 
 ```sh
 ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_openalpr_smoketest=true -e openalpr_test_image_path="tests/test.jpeg"
@@ -235,7 +263,8 @@ http://<pi-ip>/
 
 The UI is served by nginx on port 80, proxying to the Flask app (waitress)
 on 127.0.0.1:8080. To change the public port, edit the `listen` directive in
-`files/nginx/gate-anpr.conf` and redeploy.
+`files/nginx/gate-anpr.conf`, set `GATE_WEB_PORT` to the same public port for
+the Ansible smoke checks, and redeploy.
 
 ## Stream settings
 In `/etc/gate_anpr.env` (or local `files/gate_anpr.env` then redeploy):
@@ -252,6 +281,12 @@ GATE_WEB_STREAM_HEIGHT=720
 
 ```sh
 journalctl -u gate_anpr -f
+```
+
+```sh
+journalctl -u alprd -f
+journalctl -u gate_anpr_web -f
+journalctl -u gate_anpr_stream_jpeg -f
 ```
 
 ```sh
