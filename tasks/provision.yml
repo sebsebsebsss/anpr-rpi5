@@ -1,0 +1,330 @@
+---
+- name: Fail if ALPRD stream is missing or points to a local device
+  fail:
+    msg: "ALPRD_STREAM must be set to an RTSP URL; refusing to use {{ alprd_stream | default('') }}"
+  when: alprd_stream | length == 0 or alprd_stream is match('^/dev/')
+  tags:
+    - provision
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  tags:
+    - provision
+
+- name: Install baseline runtime packages
+  apt:
+    name:
+      - beanstalkd
+      - python3
+      - python3-venv
+      - python3-pip
+      - python3-rpi.gpio
+      - python3-lgpio
+      - sqlite3
+      - util-linux
+      - ffmpeg
+      - unzip
+      - avahi-daemon
+    state: present
+  tags:
+    - provision
+
+- name: Ensure systemd-timesyncd is enabled
+  systemd:
+    name: systemd-timesyncd
+    enabled: true
+    state: started
+  tags:
+    - provision
+
+- name: Check if system time is unreasonable
+  set_fact:
+    time_needs_fix: "{{ ansible_facts['date_time'].year | int > 2025 }}"
+  tags:
+    - provision
+
+- name: Set system time from controller when clock is wrong
+  command: date -u -s "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+  when: time_needs_fix
+  tags:
+    - provision
+
+- name: Check for hwclock binary
+  command: command -v hwclock
+  register: hwclock_path
+  changed_when: false
+  failed_when: false
+  tags:
+    - provision
+
+- name: Sync hardware clock from system time
+  command: "{{ hwclock_path.stdout }} --systohc"
+  when:
+    - time_needs_fix
+    - hwclock_path.rc == 0
+  tags:
+    - provision
+
+- name: Ensure NTP sync is enabled
+  command: timedatectl set-ntp true
+  changed_when: false
+  tags:
+    - provision
+
+- name: Restart systemd-timesyncd to resync time
+  systemd:
+    name: systemd-timesyncd
+    state: restarted
+  tags:
+    - provision
+
+- name: Configure avahi alias hostname
+  copy:
+    dest: /etc/avahi/hosts
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {{ ansible_default_ipv4.address }} {{ gatepi_alias_hostname }}
+  when: gatepi_alias_hostname | length > 0
+  notify: restart avahi-daemon
+  tags:
+    - provision
+
+- name: Enable and start avahi-daemon
+  systemd:
+    name: avahi-daemon
+    enabled: true
+    state: started
+  when: gatepi_alias_hostname | length > 0
+  tags:
+    - provision
+
+- name: Grant pi user access to systemd journal
+  user:
+    name: pi
+    groups: systemd-journal
+    append: true
+  tags:
+    - provision
+
+- name: Check for existing alprd binary
+  stat:
+    path: "{{ alprd_bin }}"
+  register: alprd_existing
+  tags:
+    - provision
+
+- name: Check if existing alprd is usable
+  command: "{{ alprd_bin }} --version"
+  register: alprd_version_check
+  changed_when: false
+  failed_when: false
+  when: alprd_existing.stat.exists
+  tags:
+    - provision
+
+- name: Mark alprd usability
+  set_fact:
+    alprd_usable: "{{ alprd_existing.stat.exists and (alprd_version_check.rc | default(1)) in [0, 1] }}"
+  tags:
+    - provision
+
+- name: Decide if we must build OpenALPR from source
+  set_fact:
+    build_openalpr_from_source: "{{ not alprd_usable }}"
+  tags:
+    - provision
+
+- name: Install build dependencies for OpenALPR (only if building)
+  apt:
+    name:
+      - git
+      - cmake
+      - build-essential
+      - pkg-config
+      - libopencv-dev
+      - libleptonica-dev
+      - libtesseract-dev
+      - tesseract-ocr
+      - liblog4cplus-dev
+      - libcurl4-openssl-dev
+      - libcurlpp-dev
+      - libjsoncpp-dev
+      - libpng-dev
+      - libjpeg-dev
+      - zlib1g-dev
+    state: present
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Ensure source root exists (only if building)
+  file:
+    path: "{{ src_root }}"
+    state: directory
+    mode: "0755"
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Clone OpenALPR source (only if building)
+  git:
+    repo: "{{ openalpr_repo }}"
+    dest: "{{ openalpr_src }}"
+    # Pin the SHA that matches the built binary on the live Pi.
+    # Capture it via: cd /opt/openalpr && git rev-parse HEAD
+    # then set openalpr_sha in your ansible.env or group_vars.
+    version: "{{ openalpr_sha | default('HEAD') }}"
+    depth: 1
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Clear OpenALPR build dir (fresh configure)
+  file:
+    path: "{{ openalpr_build }}"
+    state: absent
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Configure OpenALPR build (only if building)
+  command: >
+    cmake -S {{ openalpr_src }}/src -B {{ openalpr_build }}
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX={{ openalpr_install_prefix }}
+    -DCMAKE_INSTALL_SYSCONFDIR={{ openalpr_sysconfdir }}
+    -DTesseract_INCLUDE_DIR=/usr/include/tesseract
+    -DTesseract_INCLUDE_CCMAIN_DIR=/usr/include/tesseract
+    -DTesseract_INCLUDE_CCUTIL_DIR=/usr/include/tesseract
+    -DTesseract_LIB=/usr/lib/aarch64-linux-gnu/libtesseract.so
+    -DLeptonica_INCLUDE_DIR=/usr/include/leptonica
+    -DLeptonica_LIB=/usr/lib/aarch64-linux-gnu/libleptonica.so
+  args:
+    creates: "{{ openalpr_build }}/Makefile"
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Build OpenALPR (only if building)
+  command: cmake --build {{ openalpr_build }} -j2
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Install OpenALPR (only if building)
+  command: cmake --install {{ openalpr_build }}
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Refresh linker cache (only if building)
+  command: ldconfig
+  when: build_openalpr_from_source
+  tags:
+    - provision
+
+- name: Determine OpenALPR share directory
+  stat:
+    path: /usr/local/share/openalpr
+  register: openalpr_share_local
+  tags:
+    - provision
+
+- name: Set OpenALPR share directory fact
+  set_fact:
+    openalpr_share_dir: "{{ '/usr/local/share/openalpr' if openalpr_share_local.stat.exists else '/usr/share/openalpr' }}"
+  tags:
+    - provision
+
+- name: Ensure OpenALPR config directory exists
+  file:
+    path: "{{ alpr_conf_dir }}"
+    state: directory
+    mode: "0755"
+  tags:
+    - provision
+
+- name: Ensure alprd log file exists (writable by pi)
+  file:
+    path: /var/log/alpr.log
+    state: touch
+    owner: pi
+    group: pi
+    mode: "0644"
+  tags:
+    - provision
+
+- name: Render alprd.conf (site-specific)
+  template:
+    src: files/alprd.conf.j2
+    dest: "{{ alprd_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart alprd
+  tags:
+    - provision
+
+- name: Set openalpr.conf for gb and legacy tuning
+  copy:
+    dest: "{{ openalpr_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      config_file = {{ openalpr_share_dir }}/config/openalpr.defaults.conf
+      runtime_dir = {{ openalpr_share_dir }}/runtime_data
+      country = gb
+      max_plate_width_percent = 30
+      max_plate_height_percent = 10
+      topn = 5
+      must_match_pattern = 1
+  notify: restart alprd
+  tags:
+    - provision
+
+- name: Replace GB plate patterns with a broad set
+  copy:
+    dest: "{{ openalpr_share_dir }}/runtime_data/postprocess/gb.patterns"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      gb	@@##@@@
+      gb	@###@@@
+      gb	@@@###@
+      gb	@#@@@
+      gb	@@###
+      gb	@@####
+      gb	@@#@@@
+      gb	@@##@@
+      gb	@@@###
+      gb	@@@##
+      gb	@@@#
+      gb	@@##
+      gb	@@#
+      gb	@####
+      gb	@###
+      gb	@##
+      gb	@#
+      gb	####@@
+      gb	###@@
+      gb	##@@
+      gb	#@@
+      gb	@@@##
+      gb	@@@###
+      gb	###@
+      gb	##@
+      gb	#@
+      gb	@@@#
+      gb	@@##
+      gb	###@@@
+      gb	##@@@
+      gb	#@@@
+  notify: restart alprd
+  tags:
+    - provision

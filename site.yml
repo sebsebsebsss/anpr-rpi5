@@ -1,0 +1,88 @@
+---
+- name: Provision gate ANPR stack on Pi 5 (Trixie)
+  hosts: gatepi
+  become: true
+
+  vars:
+    app_dir: /opt/gate_anpr
+    plates_dir: /home/pi/plates
+    alpr_conf_dir: /etc/openalpr
+    alprd_conf_path: /etc/openalpr/alprd.conf
+    openalpr_conf_path: /etc/openalpr/openalpr.conf
+    venv_path: /opt/gate_anpr/venv
+    script_path: /opt/gate_anpr/gate_anpr.py
+
+    src_root: /opt/src
+    openalpr_repo: https://github.com/openalpr/openalpr.git
+    openalpr_src: /opt/src/openalpr
+    openalpr_build: /opt/src/openalpr/build
+    openalpr_install_prefix: /usr/local
+    openalpr_sysconfdir: /etc
+    alprd_bin: /usr/local/bin/alprd
+
+    alprd_stream: "{{ lookup('env', 'ALPRD_STREAM') | default('', true) }}"
+    alprd_stream_is_http: "{{ alprd_stream is match('^https?://') }}"
+    alprd_cpu_affinity: "{{ lookup('env', 'ALPRD_CPU_AFFINITY') | default('', true) }}"
+    alprd_roi: "{{ lookup('env', 'ALPRD_ROI') | default('', true) }}"
+
+    gate_anpr_env_path: "{{ playbook_dir }}/files/gate_anpr.env"
+    gate_web_stream_url: "{{ lookup('env', 'GATE_WEB_STREAM_URL') | default('/static/stream.jpg', true) }}"
+    gate_web_stream_rtsp_url: "{{ lookup('env', 'GATE_WEB_STREAM_RTSP_URL') | default(alprd_stream, true) }}"
+    gate_web_stream_fps: "{{ lookup('env', 'GATE_WEB_STREAM_FPS') | default('5', true) }}"
+    gate_web_stream_width: "{{ lookup('env', 'GATE_WEB_STREAM_WIDTH') | default('1280', true) }}"
+    gate_web_stream_height: "{{ lookup('env', 'GATE_WEB_STREAM_HEIGHT') | default('720', true) }}"
+    gate_web_port: "{{ lookup('env', 'GATE_WEB_PORT') | default('80', true) }}"
+    gate_api_shared_secret: "{{ lookup('env', 'GATE_API_SHARED_SECRET') | default('', true) }}"
+    gate_web_stream_encoder: "{{ lookup('env', 'GATE_WEB_STREAM_ENCODER') | default('libx264', true) }}"
+    gate_web_stream_hls_dir: "{{ app_dir }}/web/static/hls"
+    gate_web_stream_jpeg: "{{ app_dir }}/web/static/stream.jpg"
+
+    gatepi_alias_hostname: "{{ lookup('env', 'GATEPI_ALIAS_HOSTNAME') | default('gate', true) }}"
+    run_openalpr_smoketest: false
+
+  tasks:
+    - name: Provision host prerequisites
+      import_tasks: tasks/provision.yml
+
+    - name: Deploy app and services
+      import_tasks: tasks/deploy.yml
+
+  handlers:
+    - name: daemon-reload
+      systemd:
+        daemon_reload: true
+
+    - name: restart alprd
+      systemd:
+        name: alprd
+        state: restarted
+
+    - name: restart gate_anpr
+      systemd:
+        name: gate_anpr
+        state: restarted
+
+    - name: restart gate_anpr_web
+      systemd:
+        name: gate_anpr_web
+        state: restarted
+
+    - name: restart gate_anpr_stream_jpeg
+      systemd:
+        name: gate_anpr_stream_jpeg
+        state: restarted
+
+    - name: restart avahi-daemon
+      systemd:
+        name: avahi-daemon
+        state: restarted
+
+    - name: restart systemd-journald
+      systemd:
+        name: systemd-journald
+        state: restarted
+
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded

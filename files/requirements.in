@@ -1,0 +1,6 @@
+# Direct dependencies only — compile to requirements.txt via:
+#   uv pip compile files/requirements.in -o files/requirements.txt
+Flask
+greenstalk
+requests
+waitress

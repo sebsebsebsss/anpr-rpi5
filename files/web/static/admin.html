@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="gate-api-secret" content="__GATE_API_SHARED_SECRET__" />
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+    <link rel="manifest" href="/static/manifest.json" />
+    <title>Gate ANPR Admin</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="admin-page">
+    <header class="topbar">
+      <div class="topbar-left">
+        <a class="brand tab brand-tab" href="/#home" aria-label="Gate ANPR home">
+          Gate ANPR 🚪
+        </a>
+        <nav class="tabs" role="tablist">
+          <a class="tab" href="/#candidates" role="tab">Candidates</a>
+          <a class="tab" href="/#timeline" role="tab">Timeline</a>
+          <a class="tab" href="/#stream" role="tab">Live</a>
+          <a class="tab" href="/#stats" role="tab">Stats</a>
+          <a class="tab" href="/#logs" role="tab">Logs</a>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <div class="status status-chip" id="status">Admin</div>
+        <a class="admin-link active" href="/admin" aria-label="Admin settings" title="Admin settings">
+          ⚙️
+        </a>
+      </div>
+    </header>
+
+    <main class="admin">
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h1>Plate Allowlist</h1>
+            <p>Saved to the Pi allowlist JSON.</p>
+          </div>
+        </div>
+        <div id="plates-list" class="plates"></div>
+        <div class="card-actions allowlist-actions">
+          <button id="add-plate" class="btn btn-secondary">Add</button>
+          <button id="save-plates" class="btn">Save</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h1>Appearance</h1>
+            <p>Pick a theme for the web UI.</p>
+          </div>
+        </div>
+        <div class="admin-settings">
+          <label class="admin-setting">
+            <span>Theme mode</span>
+            <select id="theme-mode">
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="auto">Auto (sunrise/sunset)</option>
+            </select>
+          </label>
+          <div id="theme-mode-status" class="setting-status">Loading…</div>
+        </div>
+      </section>
+    </main>
+
+    <template id="plate-row">
+      <div class="plate-row">
+        <input class="owner-input" placeholder="Owner" />
+        <input class="plates-input" placeholder="PLATES (comma separated)" />
+        <div class="plate-meta"></div>
+        <button class="btn btn-ghost remove-plate">Remove</button>
+      </div>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
