@@ -47,6 +47,16 @@ GATE_COOLDOWN_PATH = os.getenv(
 )
 UI_SETTINGS_PATH = "/opt/gate_anpr/ui_settings.json"
 API_SHARED_SECRET = os.getenv("GATE_API_SHARED_SECRET", "").strip()
+if not API_SHARED_SECRET:
+    raise RuntimeError(
+        "GATE_API_SHARED_SECRET must be set to a non-empty value. "
+        "Generate one with: openssl rand -hex 32 "
+        "and add it to /etc/gate_anpr.env, then redeploy."
+    )
+
+_raw_origins = os.getenv("GATE_ALLOWED_ORIGINS", "http://gatepi5,http://gatepi5.local")
+ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()}
+
 MAINTENANCE_LOG_PATH = "/var/log/gate-anpr/gate-maintenance.log"
 log = configure_logging("gate_anpr_web", log_path=LOG_PATH)
 
@@ -214,8 +224,6 @@ def add_no_cache_headers(response):
 
 @app.before_request
 def require_api_secret():
-    if not API_SHARED_SECRET:
-        return None
     if request.method == "OPTIONS":
         return None
     if not request.path.startswith("/api/"):
@@ -223,7 +231,30 @@ def require_api_secret():
     supplied = request.headers.get("X-Gate-Api-Secret", "")
     if hmac.compare_digest(supplied, API_SHARED_SECRET):
         return None
-    return jsonify({"error": "forbidden"}), 403
+    return jsonify({"error": "forbidden"}), 401
+
+
+def _check_csrf():
+    """Verify Origin or Referer matches the configured allowed-origins list.
+
+    Browsers always attach Origin on cross-origin POST/PUT; JavaScript cannot
+    spoof it. A cross-site form submission from evil.com will carry
+    Origin: https://evil.com and be rejected here.
+    """
+    origin = request.headers.get("Origin", "").strip().rstrip("/")
+    if not origin:
+        ref = request.headers.get("Referer", "").strip()
+        if ref:
+            from urllib.parse import urlparse
+            parsed = urlparse(ref)
+            origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    if not origin:
+        log.warning("CSRF check failed: no Origin or Referer header on %s %s", request.method, request.path)
+        return jsonify({"error": "forbidden"}), 403
+    if origin not in ALLOWED_ORIGINS:
+        log.warning("CSRF check failed: origin %r not in allowlist on %s %s", origin, request.method, request.path)
+        return jsonify({"error": "forbidden"}), 403
+    return None
 
 
 def _parse_detail(value):
@@ -592,6 +623,9 @@ def get_plates():
 
 @app.route("/api/plates", methods=["PUT"])
 def put_plates():
+    err = _check_csrf()
+    if err:
+        return err
     data = request.get_json(force=True)
     if not isinstance(data, list):
         return jsonify({"error": "expected list"}), 400
@@ -671,6 +705,9 @@ def get_allowlist_status():
 
 @app.route("/api/open-gate", methods=["POST"])
 def open_gate():
+    err = _check_csrf()
+    if err:
+        return err
     request_ip = _request_ip()
     remaining = _gate_run_with_cooldown(
         lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log)
@@ -1177,6 +1214,9 @@ def app_config():
 @app.route("/api/ui-settings", methods=["GET", "PUT"])
 def ui_settings():
     if request.method == "PUT":
+        err = _check_csrf()
+        if err:
+            return err
         payload = request.get_json(silent=True) or {}
         mode = payload.get("theme_mode")
         if mode not in ("light", "dark", "auto"):
