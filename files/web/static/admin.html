@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Gate ANPR Admin</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="admin-page">
+    <header class="topbar">
+      <div class="brand">Gate ANPR</div>
+      <nav class="tabs">
+        <a class="tab" href="/#gate">Open Gate</a>
+        <a class="tab" href="/#plates">History</a>
+        <a class="tab" href="/#stream">Live</a>
+        <a class="tab" href="/#stats">Stats</a>
+      </nav>
+      <div class="status" id="status">Admin</div>
+    </header>
+
+    <main class="admin">
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h1>Plate Allowlist</h1>
+            <p>Saved to the Pi allowlist JSON.</p>
+          </div>
+          <div class="card-actions">
+            <button id="add-plate" class="btn btn-secondary">Add</button>
+            <button id="save-plates" class="btn">Save</button>
+          </div>
+        </div>
+        <div id="plates-list" class="plates"></div>
+      </section>
+    </main>
+
+    <template id="plate-row">
+      <div class="plate-row">
+        <input class="owner-input" placeholder="Owner" />
+        <input class="plates-input" placeholder="PLATES (comma separated)" />
+        <div class="plate-meta"></div>
+        <button class="btn btn-ghost remove-plate">Remove</button>
+      </div>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
