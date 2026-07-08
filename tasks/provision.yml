@@ -177,6 +177,10 @@
   git:
     repo: "{{ openalpr_repo }}"
     dest: "{{ openalpr_src }}"
+    # Pin the SHA that matches the built binary on the live Pi.
+    # Capture it via: cd /opt/openalpr && git rev-parse HEAD
+    # then set openalpr_sha in your ansible.env or group_vars.
+    version: "{{ openalpr_sha | default('HEAD') }}"
     depth: 1
   when: build_openalpr_from_source
   tags:

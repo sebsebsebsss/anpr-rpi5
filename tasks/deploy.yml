@@ -279,13 +279,20 @@
   tags:
     - deploy
 
-- name: Install Python dependencies into venv
+- name: Copy requirements.txt to app directory
+  copy:
+    src: files/requirements.txt
+    dest: "{{ app_dir }}/requirements.txt"
+    owner: pi
+    group: pi
+    mode: "0644"
+  tags:
+    - deploy
+
+- name: Install Python dependencies into venv (pinned)
   pip:
     virtualenv: "{{ venv_path }}"
-    name:
-      - requests
-      - greenstalk
-      - flask
+    requirements: "{{ app_dir }}/requirements.txt"
   tags:
     - deploy
 
