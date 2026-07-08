@@ -11,6 +11,7 @@ from time import gmtime, strftime
 
 import greenstalk
 from gate_runtime import configure_logging, env_int, init_events_db, insert_event, open_gate
+from allowlist_util import normalise_plate
 
 
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
@@ -71,16 +72,16 @@ def _load_plate_allowlist():
     allowlist = []
     for item in data:
         if isinstance(item, (list, tuple)) and len(item) == 2:
-            allowlist.append((str(item[0]).upper(), str(item[1])))
+            allowlist.append((normalise_plate(str(item[0])), str(item[1])))
         elif isinstance(item, dict) and "owner" in item and "plates" in item:
             owner = str(item["owner"])
             plates = item.get("plates") or []
             if isinstance(plates, str):
                 plates = [plates]
             for plate in plates:
-                allowlist.append((str(plate).upper(), owner))
+                allowlist.append((normalise_plate(str(plate)), owner))
         elif isinstance(item, dict) and "plate" in item and "owner" in item:
-            allowlist.append((str(item["plate"]).upper(), str(item["owner"])))
+            allowlist.append((normalise_plate(str(item["plate"])), str(item["owner"])))
         else:
             log.warning("Skipping malformed allowlist entry: %r", item)
     return allowlist, mtime, path
@@ -284,19 +285,20 @@ def consumer_main(client):
                 matched_plate = None
                 for cand in candidates:
                     number_plate = cand["plate"]
+                    norm_plate = normalise_plate(number_plate)
                     log.info("Candidate plate: %s", number_plate)
 
-                    allowed = number_plate in allowlist_map
+                    allowed = norm_plate in allowlist_map
                     fuzzy_match = None
                     if not allowed:
                         conf = cand.get("confidence")
                         if conf is not None and conf >= FUZZY_MIN_CONFIDENCE:
-                            fuzzy_match = _fuzzy_allowlist_match(number_plate, allowlist_map)
+                            fuzzy_match = _fuzzy_allowlist_match(norm_plate, allowlist_map)
                             if fuzzy_match:
                                 allowed = True
 
                     now = time.time()
-                    match_plate = fuzzy_match[0] if fuzzy_match else number_plate
+                    match_plate = fuzzy_match[0] if fuzzy_match else norm_plate
                     last_match = last_seen_allowed.get(match_plate, 0)
                     not_recently_seen = now > (last_match + MATCH_DEDUP_SECONDS)
 
