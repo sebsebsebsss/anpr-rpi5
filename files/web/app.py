@@ -792,7 +792,7 @@ def get_timeline():
     per_page = min(max(int(request.args.get("per_page", "25")), 5), 100)
     page = max(int(request.args.get("page", "1")), 1)
     window_key = request.args.get("window", "30d")
-    if window_key not in {"7d", "30d", "all"}:
+    if window_key not in {"7d", "30d", "all", "forever"}:
         return jsonify({"error": "invalid window"}), 400
     window = _window_bounds(window_key)
     kinds = ["recognised", "manual_open"]
@@ -835,7 +835,7 @@ def _window_bounds(window):
         return now - timedelta(days=7)
     if window == "30d":
         return now - timedelta(days=30)
-    if window == "all":
+    if window in {"all", "forever"}:
         return None
     return None
 
@@ -1131,7 +1131,7 @@ def _stats_manual_open_top_ips(window, limit=5):
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
     window_key = request.args.get("window", "24h")
-    if window_key not in {"24h", "7d", "30d", "all"}:
+    if window_key not in {"24h", "7d", "30d", "all", "forever"}:
         return jsonify({"error": "invalid window"}), 400
     window = _window_bounds(window_key)
     counts = _stats_counts(window)
@@ -1154,7 +1154,7 @@ def get_stats():
 @app.route("/api/stats/insights", methods=["GET"])
 def get_stats_insights():
     window_key = request.args.get("window", "24h")
-    if window_key not in {"24h", "7d", "30d", "all"}:
+    if window_key not in {"24h", "7d", "30d", "all", "forever"}:
         return jsonify({"error": "invalid window"}), 400
     window = _window_bounds(window_key)
     insights = {
