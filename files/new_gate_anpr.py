@@ -2,6 +2,7 @@
 ## Version 0.4 – Python 3 refactor (behaviour unchanged)
 
 import os
+import re
 import sys
 import signal
 import traceback
@@ -10,6 +11,8 @@ import json
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from time import gmtime, strftime
+
+_SAFE_UUID = re.compile(r'^[A-Za-z0-9\-]+$')
 
 import greenstalk
 from gate_runtime import configure_logging, env_int, init_events_db, insert_event, open_gate
@@ -368,6 +371,9 @@ def consumer_main(client):
 
                         open_gate(gatePin, gatePin_bcm, log)
 
+                        if uuid and not _SAFE_UUID.match(uuid):
+                            log.warning("Rejecting unsafe uuid %r; skipping plate image", uuid)
+                            uuid = None
                         jpg_path = "/home/pi/plates/%s.jpg" % uuid if uuid else ""
                         log.debug("Sending pushover with image %s", jpg_path)
                         _record_event(
