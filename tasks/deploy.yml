@@ -302,7 +302,7 @@
     user: pi
     minute: "27"
     hour: "3"
-    job: "{{ venv_path }}/bin/python {{ app_dir }}/gate_maintenance.py --db-path {{ app_dir }}/events.db --retention-days 30"
+    job: "{{ venv_path }}/bin/python {{ app_dir }}/gate_maintenance.py --db-path {{ app_dir }}/events.db --retention-days 180"
   tags:
     - deploy
 
