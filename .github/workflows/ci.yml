@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install ruff pytest flask waitress
+
+      - name: Lint (ruff check)
+        run: ruff check files/ tests/
+
+      - name: Format check (ruff format)
+        run: ruff format --check files/ tests/
+
+      - name: Run tests
+        env:
+          GATE_API_SHARED_SECRET: test-secret-for-ci
+          GATE_ALLOWED_ORIGINS: "http://localhost,http://gatepi5"
+        run: pytest tests/ -v
