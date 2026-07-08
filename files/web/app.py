@@ -64,13 +64,6 @@ app = Flask(__name__, static_folder=STATIC_DIR)
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 
-class _StreamLogFilter(logging.Filter):
-    def filter(self, record):
-        return "/static/stream.jpg" not in record.getMessage()
-
-
-logging.getLogger("werkzeug").addFilter(_StreamLogFilter())
-
 
 def _read_ui_settings():
     if not os.path.exists(UI_SETTINGS_PATH):
@@ -1436,5 +1429,6 @@ def static_proxy(path):
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("GATE_WEB_PORT", "80"))
-    app.run(host="0.0.0.0", port=port)
+    # Local dev only. Production uses waitress via systemd.
+    port = int(os.getenv("GATE_WEB_PORT", "8080"))
+    app.run(host="127.0.0.1", port=port, debug=False)

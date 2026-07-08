@@ -316,23 +316,39 @@
   tags:
     - deploy
 
-- name: Ensure libcap utilities are installed (for binding to port 80)
+- name: Install nginx
   apt:
-    name: libcap2-bin
+    name: nginx
     state: present
   tags:
     - deploy
 
-- name: Resolve venv python path for setcap
-  command: readlink -f "{{ venv_path }}/bin/python"
-  register: venv_python_real
-  changed_when: false
+- name: Remove default nginx site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
   tags:
     - deploy
 
-- name: Allow venv python to bind low ports
-  command: setcap cap_net_bind_service=+ep "{{ venv_python_real.stdout }}"
-  when: venv_python_real.stdout != ""
+- name: Deploy nginx site config for gate-anpr
+  template:
+    src: "{{ playbook_dir }}/files/nginx/gate-anpr.conf"
+    dest: /etc/nginx/sites-available/gate-anpr.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload nginx
+  tags:
+    - deploy
+    - web
+
+- name: Enable nginx gate-anpr site
+  file:
+    src: /etc/nginx/sites-available/gate-anpr.conf
+    dest: /etc/nginx/sites-enabled/gate-anpr.conf
+    state: link
+  notify: reload nginx
   tags:
     - deploy
 
@@ -428,7 +444,10 @@
       User=pi
       WorkingDirectory={{ app_dir }}/web
       EnvironmentFile=-/etc/gate_anpr.env
-      ExecStart={{ venv_path }}/bin/python {{ app_dir }}/web/app.py
+      ExecStart={{ venv_path }}/bin/waitress-serve --listen=127.0.0.1:8080 app:app
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=gate_anpr_web
       Restart=always
       RestartSec=5s
 
@@ -572,6 +591,7 @@
     - alprd
     - gate_anpr
     - gate_anpr_web
+    - nginx
   tags:
     - deploy
 

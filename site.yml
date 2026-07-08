@@ -81,3 +81,8 @@
       systemd:
         name: systemd-journald
         state: restarted
+
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
