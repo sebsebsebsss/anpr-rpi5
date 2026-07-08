@@ -413,39 +413,6 @@ def _journalctl_system_lines(since, max_lines=500):
     return result.stdout.splitlines(), ""
 
 
-def _parse_events(lines, allowlist_set):
-    events = []
-    candidate_re = re.compile(r"^(?P<ts>\\S+ \\S+) INFO Candidate plate: (?P<plate>\\S+)")
-    recognised_re = re.compile(
-        r"^(?P<ts>\\S+ \\S+) INFO Plate (?P<plate>\\S+) recognised"
-    )
-    for line in lines:
-        line = line.strip()
-        m = recognised_re.match(line)
-        if m:
-            plate = m.group("plate")
-            events.append(
-                {
-                    "timestamp": m.group("ts"),
-                    "plate": plate,
-                    "type": "recognised",
-                    "allowed": plate in allowlist_set,
-                }
-            )
-            continue
-        m = candidate_re.match(line)
-        if m:
-            plate = m.group("plate")
-            events.append(
-                {
-                    "timestamp": m.group("ts"),
-                    "plate": plate,
-                    "type": "candidate",
-                    "allowed": plate in allowlist_set,
-                }
-            )
-    return events
-
 
 def _read_last_open_time():
     try:
