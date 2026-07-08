@@ -3,10 +3,12 @@
 
 import os
 import sys
+import signal
 import traceback
 import time
 import json
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from time import gmtime, strftime
 
 import greenstalk
@@ -23,6 +25,15 @@ FUZZY_MAX_DISTANCE = env_int("FUZZY_MAX_DISTANCE", 1, "gate_anpr")
 FUZZY_MIN_CONFIDENCE = float(os.getenv("FUZZY_MIN_CONFIDENCE", "85"))
 
 log = configure_logging("gate_anpr", log_path="/var/log/gate-anpr/gate-anpr.log")
+
+_pushover_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pushover")
+
+
+def _shutdown_pool(*_):
+    _pushover_pool.shutdown(wait=False)
+
+
+signal.signal(signal.SIGTERM, _shutdown_pool)
 
 server = "127.0.0.1"
 port = 11300
@@ -181,6 +192,43 @@ def _record_event(
         fuzzy_distance=fuzzy_distance,
         fuzzy=fuzzy,
     )
+
+
+def _send_pushover(number_plate, jpg_path):
+    """Fire-and-forget Pushover notification; runs off the consumer hot path."""
+    try:
+        if os.path.exists(jpg_path):
+            with open(jpg_path, "rb") as f:
+                resp = requests.post(
+                    "https://api.pushover.net/1/messages.json",
+                    data={
+                        "token": PUSHOVER_APP_TOKEN,
+                        "user": PUSHOVER_USER_KEY,
+                        "message": "Opening gate for %s" % number_plate,
+                    },
+                    files={"attachment": ("car-reg.jpg", f, "image/jpeg")},
+                    timeout=15,
+                )
+        else:
+            log.warning("Pushover image missing: %s", jpg_path)
+            resp = requests.post(
+                "https://api.pushover.net/1/messages.json",
+                data={
+                    "token": PUSHOVER_APP_TOKEN,
+                    "user": PUSHOVER_USER_KEY,
+                    "message": "Pi5 - Opening Gate for %s" % number_plate,
+                },
+                timeout=15,
+            )
+        if resp.status_code != 200:
+            body = (resp.text or "").strip()
+            if len(body) > 300:
+                body = body[:300] + "…"
+            log.warning("Pushover failed: status=%s body=%s", resp.status_code, body)
+        else:
+            log.info("Pushover sent: status=200")
+    except Exception as exc:
+        log.warning("Pushover failed: %s", exc)
 
 
 def _maybe_reload_allowlist():
@@ -343,45 +391,8 @@ def consumer_main(client):
                             cand.get("confidence"),
                         )
                         if PUSHOVER_ENABLED:
-                            try:
-                                if os.path.exists(jpg_path):
-                                    with open(jpg_path, "rb") as f:
-                                        resp = requests.post(
-                                            "https://api.pushover.net/1/messages.json",
-                                            data={
-                                                "token": PUSHOVER_APP_TOKEN,
-                                                "user": PUSHOVER_USER_KEY,
-                                                "message": "Opening gate for %s" % number_plate,
-                                            },
-                                            files={
-                                                "attachment": ("car-reg.jpg", f, "image/jpeg")
-                                            },
-                                            timeout=15,
-                                        )
-                                else:
-                                    log.warning("Pushover image missing: %s", jpg_path)
-                                    resp = requests.post(
-                                        "https://api.pushover.net/1/messages.json",
-                                        data={
-                                            "token": PUSHOVER_APP_TOKEN,
-                                            "user": PUSHOVER_USER_KEY,
-                                            "message": "Pi5 - Opening Gate for %s" % number_plate,
-                                        },
-                                        timeout=15,
-                                    )
-                                if resp.status_code != 200:
-                                    body = (resp.text or "").strip()
-                                    if len(body) > 300:
-                                        body = body[:300] + "…"
-                                    log.warning(
-                                        "Pushover failed: status=%s body=%s",
-                                        resp.status_code,
-                                        body,
-                                    )
-                                else:
-                                    log.info("Pushover sent: status=200")
-                            except Exception as exc:
-                                log.warning("Pushover failed: %s", exc)
+                            _pushover_pool.submit(_send_pushover, number_plate, jpg_path)
+                            log.debug("Pushover queued for %s", number_plate)
                         else:
                             log.debug("Pushover skipped (not configured)")
                         break
