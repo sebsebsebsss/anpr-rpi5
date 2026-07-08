@@ -384,15 +384,14 @@ def consumer_main(client):
                             log.debug("Pushover skipped (not configured)")
                         break
                     else:
-                        if DEBUG:
-                            log.debug(
-                                "Plate %s allowed=%s recently_seen=%s",
-                                number_plate,
-                                allowed,
-                                not not_recently_seen,
-                            )
-                            if allowed and not_recently_seen is False:
-                                log.debug("Suppressing repeat match for %s", number_plate)
+                        log.debug(
+                            "Plate %s allowed=%s recently_seen=%s",
+                            number_plate,
+                            allowed,
+                            not not_recently_seen,
+                        )
+                        if allowed and not not_recently_seen:
+                            log.debug("Suppressing repeat match for %s", number_plate)
                 if not matched:
                     top_plate = candidates[0]["plate"] if candidates else "UNKNOWN"
                     now = time.time()
