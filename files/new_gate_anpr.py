@@ -315,9 +315,7 @@ def consumer_main(client):
             no_of_plates_seen = len(candidates)
             uuid = json_raw.get("uuid")
             image_name = f"{uuid}.jpg" if uuid else ""
-            captured_at = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(capture_epoch)
-            )
+            captured_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(capture_epoch))
             processing_time_ms = json_raw.get("processing_time_ms")
             allowlist_map = {plate: owner for plate, owner in list_of_plates}
 
@@ -424,17 +422,13 @@ def consumer_main(client):
                             plate=top_plate,
                             owner=owner,
                             allowed=is_known,
-                            confidence=candidates[0].get("confidence")
-                            if candidates
-                            else None,
+                            confidence=candidates[0].get("confidence") if candidates else None,
                             kind=event_kind,
                             image_name=image_name,
                             captured_at=captured_at,
                             processing_time_ms=processing_time_ms,
                             observed_plate=top_plate,
-                            observed_confidence=candidates[0].get("confidence")
-                            if candidates
-                            else None,
+                            observed_confidence=candidates[0].get("confidence") if candidates else None,
                             fuzzy_distance=None,
                             fuzzy=0,
                         )

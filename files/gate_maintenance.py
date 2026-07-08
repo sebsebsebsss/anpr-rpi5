@@ -8,8 +8,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-path", required=True)
     parser.add_argument("--retention-days", type=int, default=180)
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print how many rows would be deleted without deleting them")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print how many rows would be deleted without deleting them"
+    )
     args = parser.parse_args()
 
     logger = configure_logging(
@@ -19,14 +20,11 @@ def main():
     if args.dry_run:
         import sqlite3
         from datetime import datetime, timedelta
-        cutoff = (datetime.utcnow() - timedelta(days=args.retention_days)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+
+        cutoff = (datetime.utcnow() - timedelta(days=args.retention_days)).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(args.db_path, timeout=10)
         try:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE captured_at < ?", (cutoff,)
-            ).fetchone()
+            row = conn.execute("SELECT COUNT(*) FROM events WHERE captured_at < ?", (cutoff,)).fetchone()
         finally:
             conn.close()
         count = row[0] if row else 0

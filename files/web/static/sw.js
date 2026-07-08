@@ -29,7 +29,18 @@ self.addEventListener("fetch", (e) => {
   if (url.pathname.startsWith("/api/") || url.pathname === "/static/stream.jpg") {
     return;
   }
+  // Network-first: always serve fresh UI when online; fall back to the
+  // cached shell only when the network is unavailable. This means deploys
+  // are picked up immediately without needing a cache-name bump.
   e.respondWith(
-    caches.match(e.request).then((cached) => cached || fetch(e.request))
+    fetch(e.request)
+      .then((resp) => {
+        if (resp.ok && SHELL.includes(url.pathname === "/" ? "/" : url.pathname)) {
+          const copy = resp.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy));
+        }
+        return resp;
+      })
+      .catch(() => caches.match(e.request))
   );
 });

@@ -41,19 +41,18 @@ GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
 GATE_COOLDOWN_SECONDS = env_int("GATE_WEB_COOLDOWN", 30, "gate_anpr_web")
 MATCH_DEDUP_SECONDS = env_int("MATCH_DEDUP_SECONDS", 60, "gate_anpr_web")
-GATE_COOLDOWN_PATH = os.getenv(
-    "GATE_WEB_COOLDOWN_PATH", "/opt/gate_anpr/open_gate_last.txt"
-)
+GATE_COOLDOWN_PATH = os.getenv("GATE_WEB_COOLDOWN_PATH", "/opt/gate_anpr/open_gate_last.txt")
 UI_SETTINGS_PATH = "/opt/gate_anpr/ui_settings.json"
 API_SHARED_SECRET = os.getenv("GATE_API_SHARED_SECRET", "").strip()
 if not API_SHARED_SECRET:
     raise RuntimeError(
         "GATE_API_SHARED_SECRET must be set to a non-empty value. "
-        "Generate one with: openssl rand -hex 32 "
-        "and add it to /etc/gate_anpr.env, then redeploy."
+        "The deploy playbook auto-generates one into /etc/gate_anpr.env; "
+        "re-run the deploy, or add it manually (openssl rand -hex 32)."
     )
 
-_raw_origins = os.getenv("GATE_ALLOWED_ORIGINS", "http://gatepi5,http://gatepi5.local")
+# Optional extra origins accepted on top of the same-origin check (see _check_csrf).
+_raw_origins = os.getenv("GATE_ALLOWED_ORIGINS", "")
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()}
 
 MAINTENANCE_LOG_PATH = "/var/log/gate-anpr/gate-maintenance.log"
@@ -61,7 +60,6 @@ log = configure_logging("gate_anpr_web", log_path=LOG_PATH)
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
-
 
 
 def _read_ui_settings():
@@ -86,9 +84,7 @@ def _render_static_html(filename):
     path = os.path.join(STATIC_DIR, filename)
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
-    content = content.replace(
-        "__GATE_API_SHARED_SECRET__", escape(API_SHARED_SECRET, quote=True)
-    )
+    content = content.replace("__GATE_API_SHARED_SECRET__", escape(API_SHARED_SECRET, quote=True))
     return app.response_class(content, mimetype="text/html")
 
 
@@ -114,6 +110,7 @@ def _get_timezone_name():
 
 def _timezone_location(timezone_name):
     from tz_centroids import TZ_CENTROIDS
+
     return TZ_CENTROIDS.get(timezone_name)
 
 
@@ -131,9 +128,8 @@ def _sunrise_sunset_utc(day, latitude, longitude):
         ra = (ra + (l_quadrant - ra_quadrant)) / 15
         sin_dec = 0.39782 * math.sin(math.radians(elon))
         cos_dec = math.cos(math.asin(sin_dec))
-        cos_h = (
-            (math.cos(math.radians(90.833)) - (sin_dec * math.sin(math.radians(latitude))))
-            / (cos_dec * math.cos(math.radians(latitude)))
+        cos_h = (math.cos(math.radians(90.833)) - (sin_dec * math.sin(math.radians(latitude)))) / (
+            cos_dec * math.cos(math.radians(latitude))
         )
         if cos_h > 1 or cos_h < -1:
             return None
@@ -203,6 +199,7 @@ def _sun_times_payload():
     }
     return payload
 
+
 LOG_SERVICE_MAP = {
     "alprd": "alprd",
     "gate_anpr": "gate_anpr",
@@ -248,26 +245,44 @@ def require_api_secret():
 
 
 def _check_csrf():
-    """Verify Origin or Referer matches the configured allowed-origins list.
+    """Same-origin check on Origin (falling back to Referer) for mutating endpoints.
 
     Browsers always attach Origin on cross-origin POST/PUT; JavaScript cannot
-    spoof it. A cross-site form submission from evil.com will carry
-    Origin: https://evil.com and be rejected here.
+    spoof it. A cross-site form submission from evil.com carries
+    Origin: https://evil.com and is rejected here.
+
+    The primary rule is same-origin: the Origin host must match the Host header
+    of this request — this works regardless of which hostname, avahi alias, or
+    raw IP the client used to reach the UI. GATE_ALLOWED_ORIGINS adds explicit
+    extra origins (e.g. a reverse proxy on another name) on top of that.
     """
+    from urllib.parse import urlparse
+
     origin = request.headers.get("Origin", "").strip().rstrip("/")
     if not origin:
         ref = request.headers.get("Referer", "").strip()
         if ref:
-            from urllib.parse import urlparse
             parsed = urlparse(ref)
             origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
     if not origin:
         log.warning("CSRF check failed: no Origin or Referer header on %s %s", request.method, request.path)
         return jsonify({"error": "forbidden"}), 403
-    if origin not in ALLOWED_ORIGINS:
-        log.warning("CSRF check failed: origin %r not in allowlist on %s %s", origin, request.method, request.path)
-        return jsonify({"error": "forbidden"}), 403
-    return None
+
+    origin_host = urlparse(origin).netloc.lower()
+    request_host = request.host.lower()
+    # Same-origin: host (incl. port) matches however the client addressed us.
+    if origin_host and (origin_host == request_host or origin_host == request_host.split(":")[0]):
+        return None
+    if origin in ALLOWED_ORIGINS:
+        return None
+    log.warning(
+        "CSRF check failed: origin %r does not match host %r and is not in allowlist on %s %s",
+        origin,
+        request_host,
+        request.method,
+        request.path,
+    )
+    return jsonify({"error": "forbidden"}), 403
 
 
 def _parse_detail(value):
@@ -410,7 +425,6 @@ def _journalctl_system_lines(since, max_lines=500):
         return [], result.stderr.strip() or "journalctl failed"
 
     return result.stdout.splitlines(), ""
-
 
 
 def _read_last_open_time():
@@ -689,9 +703,7 @@ def open_gate():
     if err:
         return err
     request_ip = _request_ip()
-    remaining = _gate_run_with_cooldown(
-        lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log)
-    )
+    remaining = _gate_run_with_cooldown(lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log))
     if remaining > 0:
         return jsonify({"ok": False, "retry_in": remaining}), 429
     insert_event(
@@ -884,7 +896,7 @@ def _stats_top_plate(window, kind):
         query = f"""
             SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
             FROM events
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             GROUP BY plate
             ORDER BY count DESC
             LIMIT 1
@@ -908,7 +920,7 @@ def _stats_top_plate_multi(window, kinds):
         query = f"""
             SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
             FROM events
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             GROUP BY plate
             ORDER BY count DESC
             LIMIT 1
@@ -932,7 +944,7 @@ def _stats_top_list(window, kinds, limit=12):
         query = f"""
             SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
             FROM events
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             GROUP BY plate
             ORDER BY count DESC
             LIMIT ?
@@ -1005,7 +1017,7 @@ def _stats_processing_ms(window, kind=None):
         query = f"""
             SELECT AVG(processing_time_ms)
             FROM events
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
         """
         row = conn.execute(query, params).fetchone()
         return row[0] if row and row[0] is not None else None
@@ -1024,7 +1036,7 @@ def _stats_no_plate(window):
         query = f"""
             SELECT COUNT(*)
             FROM events
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
         """
         row = conn.execute(query, params).fetchone()
         return row[0] if row else 0
@@ -1061,7 +1073,7 @@ def _stats_source_breakdown(window):
             f"""
             SELECT COALESCE(NULLIF(source, ''), 'unknown') as source, COUNT(*)
             FROM events
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             GROUP BY source
             ORDER BY COUNT(*) DESC
             """,
@@ -1084,7 +1096,7 @@ def _stats_manual_open_top_ips(window, limit=5):
             f"""
             SELECT request_ip, COUNT(*) as count
             FROM events
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             GROUP BY request_ip
             ORDER BY count DESC, request_ip ASC
             LIMIT ?
@@ -1265,9 +1277,7 @@ def _systemctl_is_active(service):
 def _latest_event_timestamp():
     conn = sqlite3.connect(EVENTS_DB_PATH)
     try:
-        row = conn.execute(
-            "SELECT captured_at FROM events ORDER BY captured_at DESC LIMIT 1"
-        ).fetchone()
+        row = conn.execute("SELECT captured_at FROM events ORDER BY captured_at DESC LIMIT 1").fetchone()
     finally:
         conn.close()
     return parse_local_timestamp(row[0]) if row and row[0] else None
@@ -1403,6 +1413,7 @@ def index():
 @app.route("/admin")
 def admin():
     return _render_static_html("admin.html")
+
 
 @app.route("/fullscreen")
 def fullscreen():

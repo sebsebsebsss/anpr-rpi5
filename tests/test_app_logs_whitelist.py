@@ -4,6 +4,7 @@
 def _get_log_service_map():
     # Import lazily so the env var is set first.
     import app
+
     return app.LOG_SERVICE_MAP
 
 

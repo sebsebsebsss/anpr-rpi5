@@ -13,9 +13,7 @@ def env_int(name, default, logger_name="gate_runtime"):
     try:
         return int(raw)
     except ValueError:
-        logging.getLogger(logger_name).warning(
-            "Invalid %s=%r; using %s", name, raw, default
-        )
+        logging.getLogger(logger_name).warning("Invalid %s=%r; using %s", name, raw, default)
         return default
 
 
@@ -24,11 +22,7 @@ def configure_logging(service_name, *, log_path, debug_env="GATE_ANPR_DEBUG"):
     if getattr(logger, "_gate_configured", False):
         return logger
 
-    level = (
-        logging.DEBUG
-        if os.getenv(debug_env, "0").lower() in {"1", "true", "yes", "on"}
-        else logging.INFO
-    )
+    level = logging.DEBUG if os.getenv(debug_env, "0").lower() in {"1", "true", "yes", "on"} else logging.INFO
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
     logger.handlers.clear()
@@ -180,9 +174,7 @@ def insert_event(
 
 
 def prune_old_events(db_path, retention_days, logger):
-    cutoff = (datetime.utcnow() - timedelta(days=retention_days)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    cutoff = (datetime.utcnow() - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -220,7 +212,7 @@ def sqlite_healthcheck(db_path):
 
 # Relay polarity constants — HIGH activates the relay (closes the gate contact).
 # Change these two lines if your relay board is wired active-LOW.
-RELAY_ON = 1   # GPIO.HIGH
+RELAY_ON = 1  # GPIO.HIGH
 RELAY_OFF = 0  # GPIO.LOW
 
 

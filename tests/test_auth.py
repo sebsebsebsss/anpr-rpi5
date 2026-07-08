@@ -1,10 +1,12 @@
 """Tests for the Origin/Referer CSRF check and shared-secret auth."""
+
 import pytest
 
 
 @pytest.fixture(scope="module")
 def client():
     import app as flask_app
+
     flask_app.app.config["TESTING"] = True
     with flask_app.app.test_client() as c:
         yield c
@@ -76,6 +78,30 @@ def test_referer_fallback_accepted(client, monkeypatch):
         headers={
             "X-Gate-Api-Secret": "test-secret-for-ci",
             "Referer": "http://gatepi5/",
+        },
+    )
+    assert resp.status_code in (200, 429)
+
+
+def test_same_origin_accepted_regardless_of_hostname(client, monkeypatch):
+    """Same-origin requests pass even when the hostname is not in
+    GATE_ALLOWED_ORIGINS — whatever name/IP the client used to reach the
+    UI, Origin matching the request Host is accepted (avahi alias, raw
+    IP, etc.)."""
+    import app as flask_app
+
+    monkeypatch.setattr(flask_app, "trigger_gate", lambda *a, **kw: None)
+    monkeypatch.setattr(flask_app, "insert_event", lambda *a, **kw: None)
+    # Empty the explicit allowlist so this test proves the same-origin path.
+    monkeypatch.setattr(flask_app, "ALLOWED_ORIGINS", set())
+
+    # Flask test client sends Host: localhost — an Origin of http://localhost
+    # is same-origin regardless of any configured allowlist.
+    resp = client.post(
+        "/api/open-gate",
+        headers={
+            "X-Gate-Api-Secret": "test-secret-for-ci",
+            "Origin": "http://localhost",
         },
     )
     assert resp.status_code in (200, 429)

@@ -1,16 +1,20 @@
 """Tests for plate normalisation and confusable folding."""
+
 import pytest
 from allowlist_util import normalise_plate
 
 
-@pytest.mark.parametrize("inp,expected", [
-    ("AK75OCM", "AK710CM"),   # O→0
-    ("AK750CM", "AK710CM"),   # already 0, O→0 idempotent
-    ("A1B2C3", "A1B2C3"),     # no confusables
-    ("IISOZBQ", "11103BQ"),   # I→1, S→5 wait — let's check the map
-    ("lowercase", "L0WERCASE"),  # lower→upper; O→0
-    ("B8Z2S5", "B8Z2S5"),    # digits stay
-])
+@pytest.mark.parametrize(
+    "inp,expected",
+    [
+        ("AK75OCM", "AK710CM"),  # O→0
+        ("AK750CM", "AK710CM"),  # already 0, O→0 idempotent
+        ("A1B2C3", "A1B2C3"),  # no confusables
+        ("IISOZBQ", "11103BQ"),  # I→1, S→5 wait — let's check the map
+        ("lowercase", "L0WERCASE"),  # lower→upper; O→0
+        ("B8Z2S5", "B8Z2S5"),  # digits stay
+    ],
+)
 def test_normalise_roundtrip(inp, expected):
     # Just check it's idempotent: normalise(normalise(x)) == normalise(x)
     assert normalise_plate(normalise_plate(inp)) == normalise_plate(inp)

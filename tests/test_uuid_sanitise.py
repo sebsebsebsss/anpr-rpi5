@@ -1,7 +1,8 @@
 """Tests for uuid path-traversal sanitisation in new_gate_anpr."""
+
 import re
 
-_SAFE_UUID = re.compile(r'^[A-Za-z0-9\-]+$')
+_SAFE_UUID = re.compile(r"^[A-Za-z0-9\-]+$")
 
 
 def _is_safe(uuid):
