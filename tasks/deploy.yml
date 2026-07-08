@@ -399,42 +399,6 @@
   tags:
     - deploy
 
-- name: Install nginx
-  apt:
-    name: nginx
-    state: present
-  tags:
-    - deploy
-
-- name: Remove default nginx site
-  file:
-    path: /etc/nginx/sites-enabled/default
-    state: absent
-  notify: reload nginx
-  tags:
-    - deploy
-
-- name: Deploy nginx site config for gate-anpr
-  template:
-    src: "{{ playbook_dir }}/files/nginx/gate-anpr.conf"
-    dest: /etc/nginx/sites-available/gate-anpr.conf
-    owner: root
-    group: root
-    mode: "0644"
-  notify: reload nginx
-  tags:
-    - deploy
-    - web
-
-- name: Enable nginx gate-anpr site
-  file:
-    src: /etc/nginx/sites-available/gate-anpr.conf
-    dest: /etc/nginx/sites-enabled/gate-anpr.conf
-    state: link
-  notify: reload nginx
-  tags:
-    - deploy
-
 - name: Install systemd unit for alprd (source-build or override-friendly)
   copy:
     dest: /etc/systemd/system/alprd.service
@@ -536,10 +500,61 @@
 
       [Install]
       WantedBy=multi-user.target
+  register: web_unit
   notify: daemon-reload
   tags:
     - deploy
     - web
+
+# Cutover ordering matters on an upgraded Pi: the old unit ran Flask directly
+# on :80, and nginx (installed next) needs that port. Restart the web service
+# under the new unit (waitress on 127.0.0.1:8080) BEFORE nginx is installed,
+# so Debian's nginx postinst can bind :80 successfully.
+- name: Cut web UI over to waitress when its unit changed (frees :80 for nginx)
+  systemd:
+    name: gate_anpr_web
+    state: restarted
+    daemon_reload: true
+  when: web_unit.changed
+  tags:
+    - deploy
+    - web
+
+- name: Install nginx
+  apt:
+    name: nginx
+    state: present
+  tags:
+    - deploy
+
+- name: Remove default nginx site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+  tags:
+    - deploy
+
+- name: Deploy nginx site config for gate-anpr
+  template:
+    src: "{{ playbook_dir }}/files/nginx/gate-anpr.conf"
+    dest: /etc/nginx/sites-available/gate-anpr.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload nginx
+  tags:
+    - deploy
+    - web
+
+- name: Enable nginx gate-anpr site
+  file:
+    src: /etc/nginx/sites-available/gate-anpr.conf
+    dest: /etc/nginx/sites-enabled/gate-anpr.conf
+    state: link
+  notify: reload nginx
+  tags:
+    - deploy
 
 - name: Install stream watchdog script
   copy:
@@ -701,6 +716,14 @@
     name: gate_anpr_web
     state: restarted
   when: gate_web_stream_url | length > 0
+  tags:
+    - deploy
+    - web
+
+# Apply any pending daemon-reloads, service restarts, and nginx reloads now so
+# the smoke checks below test the final deployed state, not the pre-change one.
+- name: Flush handlers before smoke checks
+  meta: flush_handlers
   tags:
     - deploy
     - web
