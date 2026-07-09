@@ -174,7 +174,9 @@ def insert_event(
 
 
 def prune_old_events(db_path, retention_days, logger):
-    cutoff = (datetime.utcnow() - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+    # captured_at is stored as local time (now_local_str), so the cutoff must
+    # be local too or retention is off by the UTC offset.
+    cutoff = (datetime.now() - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")

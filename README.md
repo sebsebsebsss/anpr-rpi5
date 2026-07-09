@@ -262,9 +262,16 @@ http://<pi-ip>/
 ```
 
 The UI is served by nginx on port 80, proxying to the Flask app (waitress)
-on 127.0.0.1:8080. To change the public port, edit the `listen` directive in
-`files/nginx/gate-anpr.conf`, set `GATE_WEB_PORT` to the same public port for
-the Ansible smoke checks, and redeploy.
+on 127.0.0.1:8080. To change the public port, edit both `listen` directives in
+`files/nginx/gate-anpr.conf` (the catch-all reject block and the site block),
+set `GATE_WEB_PORT` to the same public port for the Ansible smoke checks, and
+redeploy.
+
+nginx only answers requests whose `Host` header is a known name for the Pi
+(its hostname, avahi alias, LAN IP, or localhost); anything else is dropped
+with no response. This blocks DNS-rebinding attacks against the API. If you
+reach the UI via an extra hostname (e.g. a reverse proxy), add it to the
+`server_name` list in `files/nginx/gate-anpr.conf`.
 
 ## Stream settings
 In `/etc/gate_anpr.env` (or local `files/gate_anpr.env` then redeploy):

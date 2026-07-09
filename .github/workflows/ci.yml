@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install ruff pytest flask waitress
+          pip install ruff pytest flask waitress requests
 
       - name: Lint (ruff check)
         run: ruff check files/ tests/

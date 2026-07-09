@@ -285,6 +285,15 @@ def _check_csrf():
     return jsonify({"error": "forbidden"}), 403
 
 
+def _int_arg(name, default, lo, hi):
+    """Integer query parameter clamped to [lo, hi]; falls back to default on garbage."""
+    try:
+        value = int(request.args.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, lo), hi)
+
+
 def _parse_detail(value):
     if not value:
         return None
@@ -486,12 +495,13 @@ def _gate_run_with_cooldown(action):
 
 
 def _request_ip():
-    forwarded_for = request.headers.get("X-Forwarded-For", "")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    route = request.access_route or []
-    if route:
-        return route[0]
+    # nginx sets X-Real-IP to the direct client address. X-Forwarded-For is
+    # deliberately not consulted: nginx appends to whatever list the client
+    # sent, so its first entry is client-controlled and ends up stored in the
+    # events DB and rendered in the UI.
+    real_ip = request.headers.get("X-Real-IP", "").strip()
+    if real_ip:
+        return real_ip
     return request.remote_addr or ""
 
 
@@ -755,8 +765,8 @@ def get_gate_last_open():
 
 @app.route("/api/events", methods=["GET"])
 def get_events():
-    limit = int(request.args.get("limit", "200"))
-    offset = int(request.args.get("offset", "0"))
+    limit = _int_arg("limit", 200, 1, 1000)
+    offset = _int_arg("offset", 0, 0, 1_000_000)
     kind_arg = request.args.get("kind", "").strip()
     kinds = [part.strip() for part in kind_arg.split(",") if part.strip()] or None
     window_key = request.args.get("window")
@@ -769,8 +779,8 @@ def get_events():
 
 @app.route("/api/timeline", methods=["GET"])
 def get_timeline():
-    per_page = min(max(int(request.args.get("per_page", "25")), 5), 100)
-    page = max(int(request.args.get("page", "1")), 1)
+    per_page = _int_arg("per_page", 25, 5, 100)
+    page = _int_arg("page", 1, 1, 1_000_000)
     window_key = request.args.get("window", "30d")
     if window_key not in {"7d", "30d", "all", "forever"}:
         return jsonify({"error": "invalid window"}), 400
@@ -1159,8 +1169,8 @@ def get_stats_insights():
 
 @app.route("/api/images", methods=["GET"])
 def list_images():
-    limit = int(request.args.get("limit", "60"))
-    offset = int(request.args.get("offset", "0"))
+    limit = _int_arg("limit", 60, 1, 1000)
+    offset = _int_arg("offset", 0, 0, 1_000_000)
     if not os.path.exists(PLATES_DIR):
         return jsonify([])
     entries = []
@@ -1351,8 +1361,7 @@ def service_health():
 def logs():
     service_key = request.args.get("service", "gate_anpr")
     range_key = request.args.get("range", "1h")
-    max_lines = int(request.args.get("lines", "300"))
-    max_lines = min(max(max_lines, 50), 1000)
+    max_lines = _int_arg("lines", 300, 50, 1000)
 
     since = LOG_RANGE_MAP.get(range_key, LOG_RANGE_MAP["1h"])
 

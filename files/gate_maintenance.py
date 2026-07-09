@@ -21,7 +21,8 @@ def main():
         import sqlite3
         from datetime import datetime, timedelta
 
-        cutoff = (datetime.utcnow() - timedelta(days=args.retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+        # Local time to match captured_at (see prune_old_events).
+        cutoff = (datetime.now() - timedelta(days=args.retention_days)).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(args.db_path, timeout=10)
         try:
             row = conn.execute("SELECT COUNT(*) FROM events WHERE captured_at < ?", (cutoff,)).fetchone()
