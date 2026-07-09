@@ -118,6 +118,21 @@ if not PUSHOVER_ENABLED:
     log.warning("Pushover disabled (missing PUSHOVER_USER_KEY or PUSHOVER_APP_TOKEN)")
 
 
+def _sanitise_uuid(uuid):
+    """Return uuid only if it is a safe string; else None.
+
+    The isinstance check matters — a non-str uuid would make re.match raise
+    TypeError, which the generic job handler treats as transient and retries
+    forever (poison job).
+    """
+    if uuid is None:
+        return None
+    if not isinstance(uuid, str) or not _SAFE_UUID.match(uuid):
+        log.warning("Rejecting unsafe uuid %r; skipping plate image", uuid)
+        return None
+    return uuid
+
+
 def _job_body_to_str(body):
     # greenstalk job.body may be str or bytes depending on config/version
     if isinstance(body, bytes):
@@ -316,13 +331,10 @@ def consumer_main(client):
             capture_epoch = json_raw["epoch_time"] / 1000
             min_time = capture_epoch + 10
             no_of_plates_seen = len(candidates)
-            uuid = json_raw.get("uuid")
             # Sanitise before uuid is used anywhere: image_name is stored in the
             # events DB and becomes an /images/ URL in the UI on every code path,
             # not just the matched one.
-            if uuid and not _SAFE_UUID.match(uuid):
-                log.warning("Rejecting unsafe uuid %r; skipping plate image", uuid)
-                uuid = None
+            uuid = _sanitise_uuid(json_raw.get("uuid"))
             image_name = f"{uuid}.jpg" if uuid else ""
             captured_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(capture_epoch))
             processing_time_ms = json_raw.get("processing_time_ms")

@@ -74,3 +74,29 @@ def test_worker_sigterm_handler_exits():
 
     with pytest.raises(SystemExit):
         new_gate_anpr._handle_sigterm(signal.SIGTERM, None)
+
+
+def test_sanitise_uuid_accepts_safe_string():
+    import new_gate_anpr
+
+    assert new_gate_anpr._sanitise_uuid("550e8400-e29b-41d4") == "550e8400-e29b-41d4"
+
+
+def test_sanitise_uuid_rejects_traversal():
+    import new_gate_anpr
+
+    assert new_gate_anpr._sanitise_uuid("../../etc/passwd") is None
+
+
+def test_sanitise_uuid_rejects_non_string():
+    """A numeric uuid must not raise TypeError — that would turn the job into
+    a poison message retried forever by the generic exception handler."""
+    import new_gate_anpr
+
+    assert new_gate_anpr._sanitise_uuid(12345) is None
+
+
+def test_sanitise_uuid_passes_none_through():
+    import new_gate_anpr
+
+    assert new_gate_anpr._sanitise_uuid(None) is None
