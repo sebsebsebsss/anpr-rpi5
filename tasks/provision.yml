@@ -39,9 +39,11 @@
   tags:
     - provision
 
+# A Pi without a synced clock boots in the past (epoch or the stale
+# fake-hwclock timestamp), so "unreasonable" means before this project existed.
 - name: Check if system time is unreasonable
   set_fact:
-    time_needs_fix: "{{ ansible_facts['date_time'].year | int > 2025 }}"
+    time_needs_fix: "{{ ansible_facts['date_time'].year | int < 2025 }}"
   tags:
     - provision
 

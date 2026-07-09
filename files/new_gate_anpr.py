@@ -31,11 +31,14 @@ log = configure_logging("gate_anpr", log_path="/var/log/gate-anpr/gate-anpr.log"
 _pushover_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pushover")
 
 
-def _shutdown_pool(*_):
+def _handle_sigterm(*_):
+    # Installing any handler removes SIGTERM's default terminate action, so we
+    # must exit explicitly or `systemctl stop` hangs until the SIGKILL timeout.
     _pushover_pool.shutdown(wait=False)
+    sys.exit(0)
 
 
-signal.signal(signal.SIGTERM, _shutdown_pool)
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 server = "127.0.0.1"
 port = 11300
@@ -314,6 +317,12 @@ def consumer_main(client):
             min_time = capture_epoch + 10
             no_of_plates_seen = len(candidates)
             uuid = json_raw.get("uuid")
+            # Sanitise before uuid is used anywhere: image_name is stored in the
+            # events DB and becomes an /images/ URL in the UI on every code path,
+            # not just the matched one.
+            if uuid and not _SAFE_UUID.match(uuid):
+                log.warning("Rejecting unsafe uuid %r; skipping plate image", uuid)
+                uuid = None
             image_name = f"{uuid}.jpg" if uuid else ""
             captured_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(capture_epoch))
             processing_time_ms = json_raw.get("processing_time_ms")
@@ -368,9 +377,6 @@ def consumer_main(client):
 
                         open_gate(gatePin, gatePin_bcm, log)
 
-                        if uuid and not _SAFE_UUID.match(uuid):
-                            log.warning("Rejecting unsafe uuid %r; skipping plate image", uuid)
-                            uuid = None
                         jpg_path = "/home/pi/plates/%s.jpg" % uuid if uuid else ""
                         log.debug("Sending pushover with image %s", jpg_path)
                         _record_event(

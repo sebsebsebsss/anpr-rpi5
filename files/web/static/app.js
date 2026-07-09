@@ -86,6 +86,21 @@ window.fetch = function fetchWithApiSecret(resource, init = {}) {
   return nativeFetch(resource, { ...init, headers });
 };
 
+const HTML_ESCAPES = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
+// Escape server-derived values before interpolating them into innerHTML
+// templates. Plates/owners/uuids/log lines/request IPs all originate outside
+// the browser and must never be treated as markup.
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
+}
+
 function normalizeKind(kind) {
   return kind === "candidate" ? "unmatched" : kind;
 }
@@ -706,9 +721,9 @@ function renderEvents() {
     const whenAbs = group.captured_at ? formatDayTimeLabel(group.captured_at) : "--";
     const frames = group.images.length || 0;
     summary.innerHTML = `
-      <div class="meta">${whenAbs} • ${when} • ${group.events.length} reads • ${frames} frame${
+      <div class="meta">${escapeHtml(whenAbs)} • ${escapeHtml(when)} • ${group.events.length} reads • ${frames} frame${
         frames === 1 ? "" : "s"
-      } • ${processingLabel}</div>
+      } • ${escapeHtml(processingLabel)}</div>
       <div class="event-kinds">
         <span class="kind-chip recognised">Recognised ${counts.recognised}</span>
         <span class="kind-chip unmatched">Unmatched ${counts.unmatched}</span>
@@ -746,11 +761,11 @@ function renderEvents() {
           Number.isFinite(bestEvent.fuzzy_distance) && bestEvent.fuzzy_distance > 0
             ? ` d=${bestEvent.fuzzy_distance}`
             : "";
-        observedLine = `<div class="meta">Observed: ${bestEvent.observed_plate} • Conf: ${obsConf}${fuzzy}${dist}</div>`;
+        observedLine = `<div class="meta">Observed: ${escapeHtml(bestEvent.observed_plate)} • Conf: ${obsConf}${fuzzy}${dist}</div>`;
       }
       header.innerHTML = `
-        <div class="plate">${best.plate}</div>
-        <div class="meta">${best.kind} • ${bestMeta} ${best.owner ? `• ${best.owner}` : ""}</div>
+        <div class="plate">${escapeHtml(best.plate)}</div>
+        <div class="meta">${escapeHtml(best.kind)} • ${bestMeta} ${best.owner ? `• ${escapeHtml(best.owner)}` : ""}</div>
         ${observedLine}
       `;
     }
@@ -769,8 +784,8 @@ function renderEvents() {
         : "Conf: --";
       const count = entry.count > 1 ? ` • x${entry.count}` : "";
       line.innerHTML = `
-        <div class="plate">${entry.plate}</div>
-        <div class="meta">${entry.kind}${count} • ${conf} ${entry.owner ? `• ${entry.owner}` : ""}</div>
+        <div class="plate">${escapeHtml(entry.plate)}</div>
+        <div class="meta">${escapeHtml(entry.kind)}${count} • ${conf} ${entry.owner ? `• ${escapeHtml(entry.owner)}` : ""}</div>
       `;
       if (entryIdx >= 3) {
         line.classList.add("alt-extra");
@@ -917,8 +932,8 @@ function renderLatestEvent() {
     return;
   }
   latestEventEl.innerHTML = `
-    <div class="plate">${latest.plate || "UNKNOWN"}${latest.owner ? ` - ${latest.owner}` : ""}</div>
-    <div class="meta">${formatDayTimeLabel(latest.captured_at)} - ${formatRelative(latest.captured_at)}</div>
+    <div class="plate">${escapeHtml(latest.plate || "UNKNOWN")}${latest.owner ? ` - ${escapeHtml(latest.owner)}` : ""}</div>
+    <div class="meta">${escapeHtml(formatDayTimeLabel(latest.captured_at))} - ${escapeHtml(formatRelative(latest.captured_at))}</div>
   `;
   if (cooldownEl) {
     const lastOpen = formatRelativeEpoch(state.lastGateOpenTs);
@@ -1145,20 +1160,20 @@ function renderLogs() {
   const html = [];
   filtered.forEach((line) => {
     if (line.date && line.date !== lastDate) {
-      html.push(`<div class="log-date">${line.date}</div>`);
+      html.push(`<div class="log-date">${escapeHtml(line.date)}</div>`);
       lastDate = line.date;
     }
     if (!line.time) {
       const msg = line.msg.trim();
       if (msg) {
         html.push(
-          `<div class="log-line log-line--continuation"><span class="log-msg">${msg}</span></div>`
+          `<div class="log-line log-line--continuation"><span class="log-msg">${escapeHtml(msg)}</span></div>`
         );
       }
       return;
     }
     html.push(
-      `<div class="log-line"><span class="log-ts">${line.time}</span><span class="log-msg">${line.msg}</span></div>`
+      `<div class="log-line"><span class="log-ts">${escapeHtml(line.time)}</span><span class="log-msg">${escapeHtml(line.msg)}</span></div>`
     );
   });
   output.innerHTML = html.join("");
@@ -1522,7 +1537,7 @@ function renderTabletTimeline() {
     const row = document.createElement("div");
     row.className = "tablet-timeline-row";
     const thumb = event.image_url
-      ? `<img src="${event.image_url}" alt="capture" loading="lazy" />`
+      ? `<img src="${escapeHtml(event.image_url)}" alt="capture" loading="lazy" />`
       : `<div class="tablet-thumb-placeholder"></div>`;
     const ageMinutes = getAgeMinutes(event.captured_at);
     const dotClass = ageMinutes !== null && ageMinutes < 60 ? "dot-fresh" : "dot-stale";
@@ -1530,12 +1545,12 @@ function renderTabletTimeline() {
     row.innerHTML = `
       <div class="tablet-thumb">${thumb}</div>
       <div class="tablet-info">
-        <div class="plate">${event.plate || "UNKNOWN"}${event.owner ? ` - ${event.owner}` : ""}</div>
-        <div class="meta">${formatDayTimeLabel(event.captured_at)} - ${formatRelative(event.captured_at)}</div>
+        <div class="plate">${escapeHtml(event.plate || "UNKNOWN")}${event.owner ? ` - ${escapeHtml(event.owner)}` : ""}</div>
+        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))} - ${escapeHtml(formatRelative(event.captured_at))}</div>
       </div>
       <div class="tablet-time">
         <span class="dot ${dotClass}"></span>
-        <span>${rel}</span>
+        <span>${escapeHtml(rel)}</span>
       </div>
     `;
     if (!document.body.classList.contains("fullscreen-page")) {
@@ -1917,11 +1932,11 @@ function renderTimeline() {
     row.className = `timeline-row timeline-row--${normalizeKind(event.kind)}`;
     row.innerHTML = `
       <div>
-        <div class="plate">${rowData.title}</div>
-        <div class="meta">${rowData.meta}</div>
+        <div class="plate">${escapeHtml(rowData.title)}</div>
+        <div class="meta">${escapeHtml(rowData.meta)}</div>
       </div>
-      <div class="owner">${rowData.owner}</div>
-      <div class="confidence">${rowData.confidence}</div>
+      <div class="owner">${escapeHtml(rowData.owner)}</div>
+      <div class="confidence">${escapeHtml(rowData.confidence)}</div>
     `;
     list.appendChild(row);
   });
