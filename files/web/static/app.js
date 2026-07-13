@@ -98,7 +98,7 @@ const HTML_ESCAPES = {
 // templates. Plates/owners/uuids/log lines/request IPs all originate outside
 // the browser and must never be treated as markup.
 function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
+  return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
 }
 
 function normalizeKind(kind) {
