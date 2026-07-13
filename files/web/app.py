@@ -22,6 +22,7 @@ ROOT_DIR = os.path.dirname(APP_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from allowlist_util import normalise_plate  # noqa: E402
 from gate_runtime import (  # noqa: E402
     configure_logging,
     env_int,
@@ -332,7 +333,7 @@ def _query_events(kinds=None, offset=0, limit=60, since=None):
                 {
                     "id": row["id"],
                     "uuid": row["uuid"],
-                    "plate": row["plate"],
+                    "plate": _display_plate(row["plate"]),
                     "owner": row["owner"],
                     "allowed": bool(row["allowed"]),
                     "confidence": row["confidence"],
@@ -363,6 +364,49 @@ def _read_allowlist():
         return []
     with open(ALLOWLIST_PATH, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+# Cache the normalised-key -> registered-plate map, rebuilt when the allowlist
+# file changes. Recognition matches on the normalised (OCR-confusable-folded)
+# key, so a plate registered as "S3BPN" is stored/grouped as "538PN". For
+# display we always resolve back to the plate exactly as entered in admin;
+# the recorded value is never trusted, since what the camera saw may be wrong.
+_display_cache = {"mtime": None, "map": {}}
+
+
+def _plate_display_map():
+    try:
+        mtime = os.path.getmtime(ALLOWLIST_PATH)
+    except OSError:
+        mtime = None
+    if _display_cache["mtime"] != mtime:
+        mapping = {}
+        for entry in _read_allowlist() or []:
+            if isinstance(entry, dict) and "plates" in entry:
+                plates = entry.get("plates") or []
+                if isinstance(plates, str):
+                    plates = [plates]
+            elif isinstance(entry, dict) and "plate" in entry:
+                plates = [entry.get("plate")]
+            elif isinstance(entry, (list, tuple)) and entry:
+                plates = [entry[0]]
+            else:
+                plates = []
+            for plate in plates:
+                display = str(plate).strip()
+                if display:
+                    mapping.setdefault(normalise_plate(display), display)
+        _display_cache["mtime"] = mtime
+        _display_cache["map"] = mapping
+    return _display_cache["map"]
+
+
+def _display_plate(stored):
+    """Registered plate for a stored/observed value, or the value unchanged."""
+    text = str(stored or "")
+    if not text:
+        return stored
+    return _plate_display_map().get(normalise_plate(text), stored)
 
 
 def _write_allowlist(data):
@@ -684,8 +728,17 @@ def get_allowlist_status():
             GROUP BY plate
             """
         ).fetchall()
-        last_seen_map = {row[0]: row[1] for row in rows}
-        confidence_map = {row[0]: row[2] for row in rows}
+        # Events store the normalised match key, config stores the registered
+        # plate; key both by the normalised form so the join lands. Several
+        # stored variants can fold to one key, so keep the strongest signal.
+        last_seen_map = {}
+        confidence_map = {}
+        for stored_plate, last_seen, confidence in rows:
+            key = normalise_plate(str(stored_plate or ""))
+            if last_seen is not None and last_seen > last_seen_map.get(key, ""):
+                last_seen_map[key] = last_seen
+            if confidence is not None and confidence > confidence_map.get(key, -1):
+                confidence_map[key] = confidence
     finally:
         conn.close()
     response = []
@@ -696,11 +749,12 @@ def get_allowlist_status():
             plates = [plates]
         plate_meta = []
         for plate in plates:
+            key = normalise_plate(str(plate))
             plate_meta.append(
                 {
                     "plate": plate,
-                    "last_seen": last_seen_map.get(plate),
-                    "confidence": confidence_map.get(plate),
+                    "last_seen": last_seen_map.get(key),
+                    "confidence": confidence_map.get(key),
                 }
             )
         response.append({"owner": owner, "plates": plate_meta})
@@ -914,7 +968,7 @@ def _stats_top_plate(window, kind):
         row = conn.execute(query, params).fetchone()
         if not row:
             return {"plate": None, "count": 0}
-        return {"plate": row[0], "count": row[1]}
+        return {"plate": _display_plate(row[0]), "count": row[1]}
     finally:
         conn.close()
 
@@ -938,7 +992,7 @@ def _stats_top_plate_multi(window, kinds):
         row = conn.execute(query, params).fetchone()
         if not row:
             return {"plate": None, "count": 0}
-        return {"plate": row[0], "count": row[1]}
+        return {"plate": _display_plate(row[0]), "count": row[1]}
     finally:
         conn.close()
 
@@ -960,7 +1014,7 @@ def _stats_top_list(window, kinds, limit=12):
             LIMIT ?
         """
         rows = conn.execute(query, (*params, limit)).fetchall()
-        return [{"plate": row[0], "count": row[1]} for row in rows]
+        return [{"plate": _display_plate(row[0]), "count": row[1]} for row in rows]
     finally:
         conn.close()
 
