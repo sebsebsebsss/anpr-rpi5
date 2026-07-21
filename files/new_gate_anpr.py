@@ -50,6 +50,7 @@ last_seen_unmatched = {}
 
 MATCH_DEDUP_SECONDS = env_int("MATCH_DEDUP_SECONDS", 60, "gate_anpr")
 UNMATCHED_DEDUP_SECONDS = env_int("UNMATCHED_DEDUP_SECONDS", 30, "gate_anpr")
+VEHICLE_DEDUP_MAX_DISTANCE = env_int("VEHICLE_DEDUP_MAX_DISTANCE", 2, "gate_anpr")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
 EVENT_SOURCE = os.getenv("GATE_ANPR_EVENT_SOURCE", "alprd")
 
@@ -177,6 +178,47 @@ def _fuzzy_allowlist_match(candidate, allowlist_map):
     if best_plate is None:
         return None
     return best_plate, best_owner, best_dist
+
+
+def _candidate_plate_keys(candidates):
+    keys = []
+    seen = set()
+    for cand in candidates:
+        plate = cand.get("plate") if isinstance(cand, dict) else None
+        if not isinstance(plate, str) or not plate.strip():
+            continue
+        key = normalise_plate(plate)
+        if key and key not in seen:
+            keys.append(key)
+            seen.add(key)
+    return keys
+
+
+def _mark_recent_plate_keys(cache, keys, now):
+    for key in keys:
+        if key:
+            cache[key] = now
+
+
+def _prune_recent_plate_keys(cache, now, window_seconds):
+    expired = [key for key, ts in cache.items() if now > ts + window_seconds]
+    for key in expired:
+        cache.pop(key, None)
+
+
+def _recent_vehicle_match(keys, cache, now, window_seconds, max_distance=0):
+    _prune_recent_plate_keys(cache, now, window_seconds)
+    keys = [key for key in keys if key]
+    for key in keys:
+        if key in cache:
+            return key
+    if max_distance <= 0:
+        return None
+    for key in keys:
+        for seen_key in cache:
+            if _fuzzy_distance(key, seen_key, max_distance) <= max_distance:
+                return seen_key
+    return None
 
 
 def _record_event(
@@ -339,6 +381,7 @@ def consumer_main(client):
             captured_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(capture_epoch))
             processing_time_ms = json_raw.get("processing_time_ms")
             allowlist_map = {plate: owner for plate, owner in list_of_plates}
+            candidate_keys = _candidate_plate_keys(candidates)
 
             log.info("Current Time: %s", strftime("%Y-%m-%d %H:%M:%S", gmtime()))
             log.info(
@@ -351,7 +394,7 @@ def consumer_main(client):
             # Do the thing if plate is recent, valid and hasn't already been recently seen
             if min_time > time.time():
                 matched = False
-                _matched_plate = None
+                suppressed_duplicate = False
                 for cand in candidates:
                     number_plate = cand["plate"]
                     norm_plate = normalise_plate(number_plate)
@@ -374,9 +417,8 @@ def consumer_main(client):
                     if allowed and not_recently_seen:
                         last_seen_time = now
                         last_seen_reg = match_plate
-                        last_seen_allowed[match_plate] = now
+                        _mark_recent_plate_keys(last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now)
                         matched = True
-                        _matched_plate = match_plate
                         if fuzzy_match:
                             log.info(
                                 "Fuzzy allowlist match: %s -> %s (dist=%s). Opening gate",
@@ -425,19 +467,59 @@ def consumer_main(client):
                             not not_recently_seen,
                         )
                         if allowed and not not_recently_seen:
-                            log.debug("Suppressing repeat match for %s", number_plate)
-                if not matched:
+                            suppressed_duplicate = True
+                            _mark_recent_plate_keys(
+                                last_seen_allowed,
+                                [match_plate, norm_plate] + candidate_keys,
+                                now,
+                            )
+                            log.info(
+                                "Suppressing duplicate recognised vehicle for %s (matched %s)",
+                                number_plate,
+                                match_plate,
+                            )
+                            break
+                if not matched and not suppressed_duplicate:
                     top_plate = candidates[0]["plate"] if candidates else "UNKNOWN"
                     now = time.time()
-                    last_unmatched = last_seen_unmatched.get(top_plate, 0)
-                    if now > (last_unmatched + UNMATCHED_DEDUP_SECONDS):
-                        last_seen_unmatched[top_plate] = now
-                        owner = allowlist_map.get(top_plate, "")
+                    top_key = normalise_plate(top_plate)
+                    recent_allowed = _recent_vehicle_match(
+                        [top_key] + candidate_keys,
+                        last_seen_allowed,
+                        now,
+                        MATCH_DEDUP_SECONDS,
+                        VEHICLE_DEDUP_MAX_DISTANCE,
+                    )
+                    recent_unmatched = _recent_vehicle_match(
+                        [top_key] + candidate_keys,
+                        last_seen_unmatched,
+                        now,
+                        UNMATCHED_DEDUP_SECONDS,
+                        VEHICLE_DEDUP_MAX_DISTANCE,
+                    )
+                    if recent_allowed:
+                        _mark_recent_plate_keys(last_seen_allowed, [top_key] + candidate_keys, now)
+                        log.info(
+                            "Suppressing duplicate vehicle read %s near recent recognised key %s",
+                            top_plate,
+                            recent_allowed,
+                        )
+                    elif recent_unmatched:
+                        _mark_recent_plate_keys(last_seen_unmatched, [top_key] + candidate_keys, now)
+                        log.info(
+                            "Suppressing duplicate unmatched vehicle read %s near recent key %s",
+                            top_plate,
+                            recent_unmatched,
+                        )
+                    else:
+                        _mark_recent_plate_keys(last_seen_unmatched, [top_key] + candidate_keys, now)
+                        owner = allowlist_map.get(top_key, "")
                         is_known = bool(owner)
                         event_kind = "recognised" if is_known else "unmatched"
+                        event_plate = top_key if is_known else top_plate
                         _record_event(
                             uuid=uuid,
-                            plate=top_plate,
+                            plate=event_plate,
                             owner=owner,
                             allowed=is_known,
                             confidence=candidates[0].get("confidence") if candidates else None,
