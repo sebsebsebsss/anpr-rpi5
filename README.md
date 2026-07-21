@@ -116,6 +116,7 @@ MATCH_DEDUP_SECONDS=60
 FUZZY_ALLOWLIST=1
 FUZZY_MAX_DISTANCE=1
 FUZZY_MIN_CONFIDENCE=75
+GATE_WEB_MANUAL_OPEN_MAX_AGE_SECONDS=15
 GATE_WEB_STREAM_URL=/static/stream.jpg
 # Optional: use a different stream for the web preview. Defaults to ALPRD_STREAM.
 # GATE_WEB_STREAM_RTSP_URL=rtsp://user:pass@camera-ip:554/h264Preview_01_sub
