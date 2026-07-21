@@ -41,6 +41,8 @@ GATE_PIN_BOARD = env_int("GATE_PIN_BOARD", 23, "gate_anpr_web")
 GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
 GATE_COOLDOWN_SECONDS = env_int("GATE_WEB_COOLDOWN", 30, "gate_anpr_web")
+GATE_MANUAL_OPEN_MAX_AGE_SECONDS = env_int("GATE_WEB_MANUAL_OPEN_MAX_AGE_SECONDS", 15, "gate_anpr_web")
+GATE_MANUAL_OPEN_FUTURE_SKEW_SECONDS = env_int("GATE_WEB_MANUAL_OPEN_FUTURE_SKEW_SECONDS", 10, "gate_anpr_web")
 MATCH_DEDUP_SECONDS = env_int("MATCH_DEDUP_SECONDS", 60, "gate_anpr_web")
 GATE_COOLDOWN_PATH = os.getenv("GATE_WEB_COOLDOWN_PATH", "/opt/gate_anpr/open_gate_last.txt")
 UI_SETTINGS_PATH = "/opt/gate_anpr/ui_settings.json"
@@ -549,6 +551,58 @@ def _request_ip():
     return request.remote_addr or ""
 
 
+def _manual_open_request_age_seconds():
+    raw = request.headers.get("X-Gate-Requested-At", "").strip()
+    if not raw:
+        payload = request.get_json(silent=True) or {}
+        raw = str(payload.get("requested_at_ms") or payload.get("requested_at") or "").strip()
+    if not raw:
+        return None, "missing"
+    try:
+        requested_at = float(raw)
+    except (TypeError, ValueError):
+        return None, "invalid"
+    # Browser clients send Date.now() in milliseconds. Accept seconds too so
+    # scripts can still call the endpoint deliberately.
+    if requested_at > 10_000_000_000:
+        requested_at /= 1000.0
+    return time.time() - requested_at, None
+
+
+def _check_manual_open_freshness(request_ip):
+    age_seconds, error = _manual_open_request_age_seconds()
+    if error:
+        log.warning(
+            "Manual gate open rejected from %s: %s request timestamp",
+            request_ip or "unknown",
+            error,
+        )
+        return jsonify({"error": "stale_open_request", "reason": f"{error} request timestamp"}), 400
+    if age_seconds < -GATE_MANUAL_OPEN_FUTURE_SKEW_SECONDS:
+        log.warning(
+            "Manual gate open rejected from %s: request timestamp %.1fs in the future",
+            request_ip or "unknown",
+            abs(age_seconds),
+        )
+        return jsonify({"error": "stale_open_request", "reason": "request timestamp is in the future"}), 400
+    if age_seconds > GATE_MANUAL_OPEN_MAX_AGE_SECONDS:
+        log.warning(
+            "Manual gate open rejected from %s: request age %.1fs exceeds %ss",
+            request_ip or "unknown",
+            age_seconds,
+            GATE_MANUAL_OPEN_MAX_AGE_SECONDS,
+        )
+        return jsonify(
+            {
+                "error": "stale_open_request",
+                "reason": "request expired",
+                "age_seconds": round(age_seconds, 1),
+                "max_age_seconds": GATE_MANUAL_OPEN_MAX_AGE_SECONDS,
+            }
+        ), 409
+    return None
+
+
 def _latest_gate_open_event():
     conn = sqlite3.connect(EVENTS_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -767,6 +821,9 @@ def open_gate():
     if err:
         return err
     request_ip = _request_ip()
+    err = _check_manual_open_freshness(request_ip)
+    if err:
+        return err
     remaining = _gate_run_with_cooldown(lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log))
     if remaining > 0:
         return jsonify({"ok": False, "retry_in": remaining}), 429

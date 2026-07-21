@@ -39,6 +39,7 @@ const state = {
   lastGateOpenTs: null,
   lastGateOpenMeta: null,
   loadingTimelineEvents: false,
+  gateOpenInFlight: false,
 };
 
 const LEGACY_IOS =
@@ -47,6 +48,7 @@ const LEGACY_IOS =
 
 let GROUP_WINDOW_SEC = 60;
 let STREAM_REFRESH_MS = 200;
+const OPEN_GATE_TIMEOUT_MS = 10000;
 const apiSecretMeta = document.querySelector('meta[name="gate-api-secret"]');
 const API_SHARED_SECRET = apiSecretMeta
   ? (apiSecretMeta.getAttribute("content") || "")
@@ -231,6 +233,39 @@ function isTabActive(name) {
   return Boolean(panel && panel.classList.contains("active"));
 }
 
+function setLowPriorityImage(img) {
+  if (!img) return;
+  img.loading = "lazy";
+  img.decoding = "async";
+  if ("fetchPriority" in img) {
+    img.fetchPriority = "low";
+  }
+}
+
+async function fetchOpenGate() {
+  const requestedAtMs = Date.now();
+  const init = {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Gate-Requested-At": String(requestedAtMs),
+    },
+    body: JSON.stringify({ requested_at_ms: requestedAtMs }),
+    priority: "high",
+  };
+  if (typeof AbortController === "undefined") {
+    return fetch("/api/open-gate", init);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OPEN_GATE_TIMEOUT_MS);
+  try {
+    return await fetch("/api/open-gate", { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function getGateEls({ buttonId, statusId, cooldownId }) {
   return {
     gateBtn: document.getElementById(buttonId),
@@ -297,6 +332,10 @@ function createLegacyStreamImage(url) {
     timer = setTimeout(loadNext, delay);
   };
   const loadNext = () => {
+    if (state.gateOpenInFlight) {
+      schedule(Math.max(250, STREAM_REFRESH_MS));
+      return;
+    }
     const sep = url.includes("?") ? "&" : "?";
     img.src = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
     schedule(Math.max(100, STREAM_REFRESH_MS));
@@ -361,6 +400,10 @@ function createSmoothImageStream(url) {
   };
 
   const loadNext = async () => {
+    if (state.gateOpenInFlight) {
+      schedule();
+      return;
+    }
     if (inFlight) {
       schedule();
       return;
@@ -660,9 +703,10 @@ function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
   strip.className = "frame-strip";
   images.slice(0, 6).forEach((img, idx) => {
     const thumb = document.createElement("img");
-    thumb.src = img.url;
+    setLowPriorityImage(thumb);
     thumb.alt = "frame";
     thumb.className = idx === activeIndex ? "active" : "";
+    thumb.src = img.url;
     if (Number.isFinite(img.confidence)) {
       thumb.title = `Conf: ${img.confidence.toFixed(2)}`;
     }
@@ -820,8 +864,9 @@ function renderEvents() {
       imageWrap.className = "event-image-wrap";
       const img = document.createElement("img");
       img.className = "event-image";
-      img.src = heroImage;
+      setLowPriorityImage(img);
       img.alt = "capture";
+      img.src = heroImage;
       imageWrap.appendChild(img);
       const conf = document.createElement("div");
       conf.className = "event-image-conf";
@@ -873,9 +918,10 @@ function renderLatestImage() {
     return;
   }
   const image = document.createElement("img");
-  image.src = event.image_url;
+  setLowPriorityImage(image);
   image.alt = event.plate || "capture";
   image.classList.add("latest-thumb");
+  image.src = event.image_url;
   image.addEventListener("click", () => {
     if (event && event.id) {
       jumpToEvent(String(event.id));
@@ -956,7 +1002,9 @@ async function refreshLatest() {
       state.latestRecognised = latestEvents[0];
     }
     renderLatestEvent();
-    renderLatestImage();
+    if (isTabActive("candidates")) {
+      renderLatestImage();
+    }
   } catch (err) {
     setStatus("Refresh failed");
   }
@@ -994,6 +1042,9 @@ function setActiveTab(target, { updateHash = true } = {}) {
   if (target === "candidates" && state.events.length === 0) {
     state.eventsKinds = new Set(["recognised", "unmatched"]);
     fetchEvents({ reset: true });
+  }
+  if (target === "candidates") {
+    renderLatestImage();
   }
   if (target === "timeline" && !state.timelineLoaded) {
     initTimeline();
@@ -1266,21 +1317,33 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
     cooldownId,
   });
   if (!gateBtn) return;
+  if (gateBtn.dataset.gateHandlerBound === "true") return;
+  gateBtn.dataset.gateHandlerBound = "true";
   gateBtn.addEventListener("click", async () => {
     gateBtn.disabled = true;
     gateBtn.textContent = "Opening...";
     setGateStatus(gateStatus, "opening", "Gate opening");
     setGateButtonState(gateBtn, "opening");
+    state.gateOpenInFlight = true;
     try {
-      const resp = await fetch("/api/open-gate", { method: "POST" });
+      const resp = await fetchOpenGate();
       if (resp.status === 429) {
         const data = await resp.json();
         const retryIn = data.retry_in || 30;
         setStatus(`Opening the gate (${retryIn}s)`);
         startCooldownCountdown(retryIn, { gateBtn, gateStatus, cooldownEl });
       } else if (!resp.ok) {
-        setStatus("Open failed");
-        setGateStatus(gateStatus, "error", "Open failed");
+        let message = "Open failed";
+        try {
+          const data = await resp.json();
+          if (data && data.error === "stale_open_request") {
+            message = "Open request expired";
+          }
+        } catch (err) {
+          // Keep the generic failure message if the response is not JSON.
+        }
+        setStatus(message);
+        setGateStatus(gateStatus, "error", message);
         setGateButtonState(gateBtn, "error");
       } else {
         setStatus("Gate opened");
@@ -1288,10 +1351,12 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
         refreshGateLastOpen();
       }
     } catch (err) {
-      setStatus("Open failed");
-      setGateStatus(gateStatus, "error", "Open failed");
+      const message = err && err.name === "AbortError" ? "Open timed out" : "Open failed";
+      setStatus(message);
+      setGateStatus(gateStatus, "error", message);
       setGateButtonState(gateBtn, "error");
     } finally {
+      state.gateOpenInFlight = false;
       if (!gateBtn.dataset.cooldown) {
         gateBtn.disabled = false;
         gateBtn.textContent = "Open the gate";
@@ -1432,7 +1497,9 @@ async function initMain() {
   updateStatusTimestamp();
   setKindFilters(["recognised", "unmatched"]);
   state.latestRecognised = null;
-  await fetchEvents({ reset: true });
+  if (isTabActive("candidates") && state.events.length === 0 && !state.loadingCandidateEvents) {
+    await fetchEvents({ reset: true });
+  }
   initCooldownStatus();
   refreshGateLastOpen();
   updateStatusTimestamp();
@@ -1537,7 +1604,7 @@ function renderTabletTimeline() {
     const row = document.createElement("div");
     row.className = "tablet-timeline-row";
     const thumb = event.image_url
-      ? `<img src="${escapeHtml(event.image_url)}" alt="capture" loading="lazy" />`
+      ? `<img src="${escapeHtml(event.image_url)}" alt="capture" loading="lazy" decoding="async" fetchpriority="low" />`
       : `<div class="tablet-thumb-placeholder"></div>`;
     const ageMinutes = getAgeMinutes(event.captured_at);
     const dotClass = ageMinutes !== null && ageMinutes < 60 ? "dot-fresh" : "dot-stale";
