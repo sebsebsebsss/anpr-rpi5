@@ -28,6 +28,22 @@ def test_recent_vehicle_match_covers_ocr_variants_and_expiry():
     assert new_gate_anpr._recent_vehicle_match(["QQ0VVV"], cache, 1031, 30, max_distance=2) is None
 
 
+def test_allowlist_display_map_preserves_registered_plate():
+    import new_gate_anpr
+
+    entries = [
+        new_gate_anpr._allowlist_entry("SX3BPN", "Owner"),
+        ("QQ17VVV", "Legacy Owner"),
+    ]
+
+    owner_map = new_gate_anpr._allowlist_owner_map(entries)
+    display_map = new_gate_anpr._allowlist_display_map(entries)
+
+    assert owner_map["5X38PN"] == "Owner"
+    assert display_map["5X38PN"] == "SX3BPN"
+    assert display_map["QQ17VVV"] == "QQ17VVV"
+
+
 class _FakeJob:
     def __init__(self, job_id, payload):
         self.id = job_id
@@ -117,3 +133,41 @@ def test_consumer_suppresses_same_vehicle_recognised_and_ocr_variant(monkeypatch
     assert records[0]["kind"] == "recognised"
     assert records[0]["plate"] == "QQ17VVV"
     assert records[0]["observed_plate"] == "QQ7VVV"
+
+
+def test_pushover_uses_registered_plate_not_observed_ocr(monkeypatch):
+    import new_gate_anpr
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            fn(*args)
+
+    records = []
+    opened = []
+    notifications = []
+
+    monkeypatch.setattr(new_gate_anpr.greenstalk, "TimedOutError", TimeoutError, raising=False)
+    monkeypatch.setattr(new_gate_anpr, "_maybe_reload_allowlist", lambda: None)
+    monkeypatch.setattr(new_gate_anpr, "open_gate", lambda *args, **kwargs: opened.append(args))
+    monkeypatch.setattr(new_gate_anpr, "_record_event", lambda **kwargs: records.append(kwargs))
+    monkeypatch.setattr(new_gate_anpr, "_send_pushover", lambda plate, path: notifications.append((plate, path)))
+    monkeypatch.setattr(new_gate_anpr, "_pushover_pool", ImmediatePool())
+    monkeypatch.setattr(new_gate_anpr.time, "time", lambda: 1000)
+    monkeypatch.setattr(new_gate_anpr, "list_of_plates", [new_gate_anpr._allowlist_entry("SX3BPN", "Owner")])
+    monkeypatch.setattr(new_gate_anpr, "last_seen_allowed", {})
+    monkeypatch.setattr(new_gate_anpr, "last_seen_unmatched", {})
+    monkeypatch.setattr(new_gate_anpr, "PUSHOVER_ENABLED", True)
+    monkeypatch.setattr(new_gate_anpr, "FUZZY_ALLOWLIST", True)
+    monkeypatch.setattr(new_gate_anpr, "FUZZY_MAX_DISTANCE", 1)
+    monkeypatch.setattr(new_gate_anpr, "FUZZY_MIN_CONFIDENCE", 70)
+
+    client = _FakeClient([_FakeJob("job-1", _payload("frame-1", "9X3BPN", 88.0))])
+
+    with pytest.raises(KeyboardInterrupt):
+        new_gate_anpr.consumer_main(client)
+
+    assert len(opened) == 1
+    assert len(records) == 1
+    assert records[0]["plate"] == "5X38PN"
+    assert records[0]["observed_plate"] == "9X3BPN"
+    assert notifications == [("SX3BPN", "/home/pi/plates/frame-1.jpg")]

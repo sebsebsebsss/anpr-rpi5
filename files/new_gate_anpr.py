@@ -89,19 +89,38 @@ def _load_plate_allowlist():
     allowlist = []
     for item in data:
         if isinstance(item, (list, tuple)) and len(item) == 2:
-            allowlist.append((normalise_plate(str(item[0])), str(item[1])))
+            allowlist.append(_allowlist_entry(item[0], item[1]))
         elif isinstance(item, dict) and "owner" in item and "plates" in item:
             owner = str(item["owner"])
             plates = item.get("plates") or []
             if isinstance(plates, str):
                 plates = [plates]
             for plate in plates:
-                allowlist.append((normalise_plate(str(plate)), owner))
+                allowlist.append(_allowlist_entry(plate, owner))
         elif isinstance(item, dict) and "plate" in item and "owner" in item:
-            allowlist.append((normalise_plate(str(item["plate"])), str(item["owner"])))
+            allowlist.append(_allowlist_entry(item["plate"], item["owner"]))
         else:
             log.warning("Skipping malformed allowlist entry: %r", item)
     return allowlist, mtime, path
+
+
+def _allowlist_entry(plate, owner):
+    display_plate = str(plate).strip()
+    return normalise_plate(display_plate), str(owner), display_plate
+
+
+def _allowlist_owner_map(entries):
+    return {entry[0]: entry[1] for entry in entries if len(entry) >= 2}
+
+
+def _allowlist_display_map(entries):
+    mapping = {}
+    for entry in entries:
+        if len(entry) < 2:
+            continue
+        display_plate = entry[2] if len(entry) >= 3 and entry[2] else entry[0]
+        mapping.setdefault(entry[0], display_plate)
+    return mapping
 
 
 list_of_plates, allowlist_mtime, allowlist_watch_path = _load_plate_allowlist()
@@ -256,7 +275,7 @@ def _record_event(
     )
 
 
-def _send_pushover(number_plate, jpg_path):
+def _send_pushover(display_plate, jpg_path):
     """Fire-and-forget Pushover notification; runs off the consumer hot path."""
     try:
         if os.path.exists(jpg_path):
@@ -266,7 +285,7 @@ def _send_pushover(number_plate, jpg_path):
                     data={
                         "token": PUSHOVER_APP_TOKEN,
                         "user": PUSHOVER_USER_KEY,
-                        "message": "Opening gate for %s" % number_plate,
+                        "message": "Opening gate for %s" % display_plate,
                     },
                     files={"attachment": ("car-reg.jpg", f, "image/jpeg")},
                     timeout=15,
@@ -278,7 +297,7 @@ def _send_pushover(number_plate, jpg_path):
                 data={
                     "token": PUSHOVER_APP_TOKEN,
                     "user": PUSHOVER_USER_KEY,
-                    "message": "Pi5 - Opening Gate for %s" % number_plate,
+                    "message": "Pi5 - Opening Gate for %s" % display_plate,
                 },
                 timeout=15,
             )
@@ -380,7 +399,8 @@ def consumer_main(client):
             image_name = f"{uuid}.jpg" if uuid else ""
             captured_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(capture_epoch))
             processing_time_ms = json_raw.get("processing_time_ms")
-            allowlist_map = {plate: owner for plate, owner in list_of_plates}
+            allowlist_map = _allowlist_owner_map(list_of_plates)
+            allowlist_display_map = _allowlist_display_map(list_of_plates)
             candidate_keys = _candidate_plate_keys(candidates)
 
             log.info("Current Time: %s", strftime("%Y-%m-%d %H:%M:%S", gmtime()))
@@ -417,17 +437,18 @@ def consumer_main(client):
                     if allowed and not_recently_seen:
                         last_seen_time = now
                         last_seen_reg = match_plate
+                        display_plate = allowlist_display_map.get(match_plate, match_plate)
                         _mark_recent_plate_keys(last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now)
                         matched = True
                         if fuzzy_match:
                             log.info(
                                 "Fuzzy allowlist match: %s -> %s (dist=%s). Opening gate",
                                 number_plate,
-                                match_plate,
+                                display_plate,
                                 fuzzy_match[2],
                             )
                         else:
-                            log.info("Plate %s recognised. Opening gate", number_plate)
+                            log.info("Plate %s recognised. Opening gate", display_plate)
 
                         open_gate(gatePin, gatePin_bcm, log)
 
@@ -454,8 +475,8 @@ def consumer_main(client):
                             cand.get("confidence"),
                         )
                         if PUSHOVER_ENABLED:
-                            _pushover_pool.submit(_send_pushover, number_plate, jpg_path)
-                            log.debug("Pushover queued for %s", number_plate)
+                            _pushover_pool.submit(_send_pushover, display_plate, jpg_path)
+                            log.debug("Pushover queued for %s", display_plate)
                         else:
                             log.debug("Pushover skipped (not configured)")
                         break
@@ -570,8 +591,10 @@ def main():
         client = _new_client()
 
         log.info("Opening the gate for:")
-        for plate, owner in list_of_plates:
-            log.info(" - %s (%s)", plate, owner)
+        for entry in list_of_plates:
+            plate, owner = entry[0], entry[1]
+            display_plate = entry[2] if len(entry) >= 3 and entry[2] else plate
+            log.info(" - %s (%s)", display_plate, owner)
         log.info("---")
         log.info("Eating the beans")
         consumer_main(client)
