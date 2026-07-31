@@ -158,7 +158,9 @@ def test_pushover_uses_registered_plate_not_observed_ocr(monkeypatch):
     monkeypatch.setattr(new_gate_anpr, "_maybe_reload_allowlist", lambda: None)
     monkeypatch.setattr(new_gate_anpr, "open_gate", lambda *args, **kwargs: opened.append(args))
     monkeypatch.setattr(new_gate_anpr, "_record_event", lambda **kwargs: records.append(kwargs))
-    monkeypatch.setattr(new_gate_anpr, "_send_pushover", lambda owner, plate, path: notifications.append((owner, plate, path)))
+    monkeypatch.setattr(
+        new_gate_anpr, "_send_pushover", lambda owner, plate, path: notifications.append((owner, plate, path))
+    )
     monkeypatch.setattr(new_gate_anpr, "_pushover_pool", ImmediatePool())
     monkeypatch.setattr(new_gate_anpr.time, "time", lambda: 1000)
     monkeypatch.setattr(new_gate_anpr, "list_of_plates", [new_gate_anpr._allowlist_entry("SX3BPN", "Owner")])
