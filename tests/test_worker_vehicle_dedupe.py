@@ -44,6 +44,14 @@ def test_allowlist_display_map_preserves_registered_plate():
     assert display_map["QQ17VVV"] == "QQ17VVV"
 
 
+def test_pushover_message_uses_label_and_registered_plate():
+    import new_gate_anpr
+
+    assert new_gate_anpr._pushover_message("Jim", "A1 ABC") == "Jim - A1 ABC"
+    assert new_gate_anpr._pushover_message("", "A1 ABC") == "A1 ABC"
+    assert new_gate_anpr._pushover_message("Jim", "") == "Jim"
+
+
 class _FakeJob:
     def __init__(self, job_id, payload):
         self.id = job_id
@@ -150,7 +158,7 @@ def test_pushover_uses_registered_plate_not_observed_ocr(monkeypatch):
     monkeypatch.setattr(new_gate_anpr, "_maybe_reload_allowlist", lambda: None)
     monkeypatch.setattr(new_gate_anpr, "open_gate", lambda *args, **kwargs: opened.append(args))
     monkeypatch.setattr(new_gate_anpr, "_record_event", lambda **kwargs: records.append(kwargs))
-    monkeypatch.setattr(new_gate_anpr, "_send_pushover", lambda plate, path: notifications.append((plate, path)))
+    monkeypatch.setattr(new_gate_anpr, "_send_pushover", lambda owner, plate, path: notifications.append((owner, plate, path)))
     monkeypatch.setattr(new_gate_anpr, "_pushover_pool", ImmediatePool())
     monkeypatch.setattr(new_gate_anpr.time, "time", lambda: 1000)
     monkeypatch.setattr(new_gate_anpr, "list_of_plates", [new_gate_anpr._allowlist_entry("SX3BPN", "Owner")])
@@ -170,4 +178,4 @@ def test_pushover_uses_registered_plate_not_observed_ocr(monkeypatch):
     assert len(records) == 1
     assert records[0]["plate"] == "5X38PN"
     assert records[0]["observed_plate"] == "9X3BPN"
-    assert notifications == [("SX3BPN", "/home/pi/plates/frame-1.jpg")]
+    assert notifications == [("Owner", "SX3BPN", "/home/pi/plates/frame-1.jpg")]

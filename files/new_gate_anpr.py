@@ -275,8 +275,17 @@ def _record_event(
     )
 
 
-def _send_pushover(display_plate, jpg_path):
+def _pushover_message(owner, display_plate):
+    owner_text = str(owner or "").strip()
+    plate_text = str(display_plate or "").strip()
+    if owner_text and plate_text:
+        return "%s - %s" % (owner_text, plate_text)
+    return owner_text or plate_text
+
+
+def _send_pushover(owner, display_plate, jpg_path):
     """Fire-and-forget Pushover notification; runs off the consumer hot path."""
+    message = _pushover_message(owner, display_plate)
     try:
         if os.path.exists(jpg_path):
             with open(jpg_path, "rb") as f:
@@ -285,7 +294,7 @@ def _send_pushover(display_plate, jpg_path):
                     data={
                         "token": PUSHOVER_APP_TOKEN,
                         "user": PUSHOVER_USER_KEY,
-                        "message": "Opening gate for %s" % display_plate,
+                        "message": message,
                     },
                     files={"attachment": ("car-reg.jpg", f, "image/jpeg")},
                     timeout=15,
@@ -297,7 +306,7 @@ def _send_pushover(display_plate, jpg_path):
                 data={
                     "token": PUSHOVER_APP_TOKEN,
                     "user": PUSHOVER_USER_KEY,
-                    "message": "Pi5 - Opening Gate for %s" % display_plate,
+                    "message": message,
                 },
                 timeout=15,
             )
@@ -437,6 +446,7 @@ def consumer_main(client):
                     if allowed and not_recently_seen:
                         last_seen_time = now
                         last_seen_reg = match_plate
+                        owner = allowlist_map.get(match_plate, "")
                         display_plate = allowlist_display_map.get(match_plate, match_plate)
                         _mark_recent_plate_keys(last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now)
                         matched = True
@@ -457,7 +467,7 @@ def consumer_main(client):
                         _record_event(
                             uuid=uuid,
                             plate=match_plate,
-                            owner=allowlist_map.get(match_plate, ""),
+                            owner=owner,
                             allowed=True,
                             confidence=cand.get("confidence"),
                             kind="recognised",
@@ -475,8 +485,8 @@ def consumer_main(client):
                             cand.get("confidence"),
                         )
                         if PUSHOVER_ENABLED:
-                            _pushover_pool.submit(_send_pushover, display_plate, jpg_path)
-                            log.debug("Pushover queued for %s", display_plate)
+                            _pushover_pool.submit(_send_pushover, owner, display_plate, jpg_path)
+                            log.debug("Pushover queued for %s", _pushover_message(owner, display_plate))
                         else:
                             log.debug("Pushover skipped (not configured)")
                         break
