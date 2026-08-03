@@ -1590,6 +1590,8 @@ async function fetchTabletTimeline({ reset = false } = {}) {
     if (!same) {
       state.tabletEvents = data;
       renderTabletTimeline();
+    } else {
+      updateTabletTimelineRelativeTimes();
     }
   } catch (err) {
     // silent
@@ -1609,15 +1611,16 @@ function renderTabletTimeline() {
     const ageMinutes = getAgeMinutes(event.captured_at);
     const dotClass = ageMinutes !== null && ageMinutes < 60 ? "dot-fresh" : "dot-stale";
     const rel = formatRelative(event.captured_at);
+    const timestamp = escapeHtml(event.captured_at || "");
     row.innerHTML = `
       <div class="tablet-thumb">${thumb}</div>
       <div class="tablet-info">
         <div class="plate">${escapeHtml(event.plate || "UNKNOWN")}${event.owner ? ` - ${escapeHtml(event.owner)}` : ""}</div>
-        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))} - ${escapeHtml(formatRelative(event.captured_at))}</div>
+        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))} - <span data-tablet-relative="${timestamp}">${escapeHtml(rel)}</span></div>
       </div>
       <div class="tablet-time">
-        <span class="dot ${dotClass}"></span>
-        <span>${escapeHtml(rel)}</span>
+        <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}"></span>
+        <span data-tablet-relative="${timestamp}">${escapeHtml(rel)}</span>
       </div>
     `;
     if (!document.body.classList.contains("fullscreen-page")) {
@@ -1636,6 +1639,20 @@ function renderTabletTimeline() {
     empty.textContent = "No recognised plates yet.";
     list.appendChild(empty);
   }
+}
+
+function updateTabletTimelineRelativeTimes() {
+  const list = document.getElementById("tablet-timeline-list");
+  if (!list) return;
+  list.querySelectorAll("[data-tablet-relative]").forEach((node) => {
+    node.textContent = formatRelative(node.dataset.tabletRelative);
+  });
+  list.querySelectorAll("[data-tablet-relative-dot]").forEach((dot) => {
+    const ageMinutes = getAgeMinutes(dot.dataset.tabletRelativeDot);
+    const isFresh = ageMinutes !== null && ageMinutes < 60;
+    dot.classList.toggle("dot-fresh", isFresh);
+    dot.classList.toggle("dot-stale", !isFresh);
+  });
 }
 
 async function initStream() {
