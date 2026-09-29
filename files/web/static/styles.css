@@ -556,7 +556,7 @@ body.theme-dark .log-ts {
 }
 
 .tablet-stream-frame {
-  background: #111;
+  background: var(--panel);
   border-radius: 16px;
   overflow: hidden;
   aspect-ratio: 16 / 9;
@@ -731,10 +731,7 @@ body.theme-dark .log-ts {
   font-variant-numeric: tabular-nums;
 }
 
-body.theme-dark .home-health .status-ok {
-  color: #75d49c;
-}
-
+.home-health .live-badge.status-ok,
 .live-badge.status-neutral {
   color: var(--muted);
   border-color: var(--border);
@@ -1767,7 +1764,7 @@ textarea {
   aspect-ratio: 16 / 9;
   border-radius: 16px;
   overflow: hidden;
-  background: #1b1b1b;
+  background: var(--panel);
   border: 1px solid var(--border);
   position: relative;
 }
