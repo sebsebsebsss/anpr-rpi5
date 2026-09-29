@@ -114,9 +114,11 @@ Branch: `design/device-layout-and-insights`. UX-10 and UX-11 are implemented
 for review, with an independent alternative mockup and a synthetic local
 comparison server. Production UI and recognition settings were not changed.
 
-- 337 Python tests and all six JavaScript suites passed; Ruff lint/format and
-  diff checks passed. New Stats API tests cover legacy categories, time bounds,
-  missing plates and read-only database access.
+- 337 Python tests passed on macOS/Python 3.14 and Linux/Python 3.11; all six
+  JavaScript suites, Ruff lint/format and diff checks passed. New Stats API
+  tests cover legacy categories, time bounds, missing plates and read-only
+  database access. Linux verification caught and fixed an unclosed test-fixture
+  connection whose delayed SQLite checkpoint invalidated byte comparisons.
 - Home browser checks cover six viewport sizes, both themes and legacy sizing.
   Stats checks cover four viewport sizes, both themes, empty/error recovery,
   independent health failure, keyboard chart selection and a device clock/time

@@ -1,6 +1,8 @@
 """Stats use the same legacy recognition categories as history, without writes."""
 
+import gc
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 
 import app
@@ -36,7 +38,9 @@ def stats(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "trigger_gate", forbidden)
 
     def add(kind, plate, owner=None, processing=None, age=timedelta(hours=1), source="alprd"):
-        with sqlite3.connect(database) as connection:
+        # A connection's transaction context commits but does not close it.
+        # Close before byte snapshots so later GC cannot checkpoint fixture WAL.
+        with closing(sqlite3.connect(database)) as connection, connection:
             connection.execute(
                 """INSERT INTO events
                 (kind, plate, owner, processing_time_ms, captured_at, created_at, source)
@@ -75,6 +79,7 @@ def test_stats_and_history_agree_on_legacy_recognition(stats):
     client, database, add = stats
     add_mixed_history(add)
     before = database.read_bytes()
+    gc.collect()
     response = client.get("/api/stats?window=24h", headers=HEADERS)
     assert response.status_code == 200
     assert "no-store" in response.headers["Cache-Control"]
@@ -91,6 +96,7 @@ def test_stats_and_history_agree_on_legacy_recognition(stats):
         "alprd": 2,
         "web_ui": 1,
     }
+    gc.collect()
     assert database.read_bytes() == before
 
 
@@ -98,6 +104,7 @@ def test_rankings_and_processing_use_canonical_categories(stats):
     client, database, add = stats
     add_mixed_history(add)
     before = database.read_bytes()
+    gc.collect()
     response = client.get("/api/stats/insights?window=24h", headers=HEADERS)
     assert response.status_code == 200
     insights = response.get_json()["insights"]
@@ -118,6 +125,7 @@ def test_rankings_and_processing_use_canonical_categories(stats):
         "candidate": 300,
     }
     assert insights["no_plate"] == 3
+    gc.collect()
     assert database.read_bytes() == before
 
 
