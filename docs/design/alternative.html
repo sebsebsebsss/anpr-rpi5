@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Gate — alternative design preview</title>
+  <style>
+    :root { --bg:#101510; --surface:#192019; --surface-2:#202920; --line:#2d392d; --text:#edf2e9; --muted:#a0ae9d; --quiet:#758673; --green:#b4e3a4; --green-ink:#173213; --green-dim:#263d27; --amber:#e2bd86; --amber-dim:#3c3426; --red:#efb1a8; --red-dim:#442d2a; --shadow:0 20px 70px rgba(0,0,0,.2); }
+    body.light { --bg:#f3f4ee; --surface:#ffffff; --surface-2:#f0f3eb; --line:#dde4d7; --text:#22301f; --muted:#64745e; --quiet:#75856d; --green:#315f31; --green-ink:#ffffff; --green-dim:#e8f1df; --amber:#8c6226; --amber-dim:#f6eddf; --red:#a24235; --red-dim:#f7e7e3; --shadow:0 20px 70px rgba(26,48,24,.09); }
+    * { box-sizing:border-box; }
+    html { min-width:320px; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; -webkit-font-smoothing:antialiased; }
+    button { font:inherit; cursor:pointer; }
+    button,a { -webkit-tap-highlight-color:transparent; }
+    button { color:inherit; }
+    button:focus-visible,a:focus-visible { outline:2px solid var(--green); outline-offset:4px; }
+    button:disabled { cursor:default; opacity:.55; }
+    svg { display:block; }
+    .icon { width:19px; height:19px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+    .symbols { position:absolute; width:0; height:0; overflow:hidden; }
+    .sidebar { position:fixed; z-index:10; top:0; bottom:0; left:0; width:188px; display:flex; flex-direction:column; padding:32px 20px 22px; border-right:1px solid var(--line); }
+    .brand { display:flex; align-items:center; gap:10px; font-size:23px; font-weight:650; letter-spacing:-1px; }
+    .brand-mark { display:flex; align-items:center; justify-content:center; width:31px; height:31px; border:1px solid var(--green); border-radius:8px; color:var(--green); }
+    .brand-mark .icon { width:22px; height:22px; }
+    .brand-note { font-size:11px; color:var(--muted); margin:10px 0 42px; }
+    .nav { display:flex; flex-direction:column; gap:7px; }
+    .nav-button { display:flex; align-items:center; gap:12px; border:0; padding:12px 13px; border-radius:8px; background:none; text-align:left; color:var(--muted); font-weight:550; }
+    .nav-button.active { color:var(--green); background:var(--green-dim); }
+    .nav-button:hover { background:var(--surface-2); }
+    .sidebar-footer { margin-top:auto; color:var(--quiet); font-size:11px; line-height:1.7; }
+    .sidebar-footer strong { font-size:12px; color:var(--muted); font-weight:500; }
+    .sidebar-footer .hairline { width:28px; height:1px; background:var(--line); margin-bottom:16px; }
+    .main { margin-left:188px; max-width:1560px; padding:27px 38px 24px; }
+    .topbar { min-height:40px; display:flex; justify-content:space-between; align-items:center; gap:15px; margin-bottom:32px; }
+    .topbar-location { display:flex; align-items:center; gap:9px; font-size:12px; color:var(--muted); }
+    .topbar-location span:first-of-type { color:var(--text); }
+    .topbar-location .divider { color:var(--quiet); margin:0 4px; }
+    .topbar-brand { display:none; }
+    .topbar-actions { display:flex; align-items:center; gap:17px; }
+    .demo-tag { font-size:10px; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); }
+    .icon-button { display:inline-flex; align-items:center; justify-content:center; padding:9px; min-height:40px; min-width:40px; border:1px solid var(--line); background:transparent; border-radius:50%; }
+    .icon-button:hover { background:var(--surface-2); }
+    .page-header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:23px; gap:16px; }
+    .eyebrow { color:var(--muted); font-size:10px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; margin:0 0 7px; }
+    h1 { margin:0; font-size:31px; line-height:1.12; font-weight:560; letter-spacing:-1.2px; }
+    .header-note { color:var(--muted); font-size:12px; text-align:right; }
+    .header-note strong { display:block; color:var(--text); font-size:13px; font-weight:500; }
+    .top-nav { display:none; }
+    .home-layout { display:grid; grid-template-columns:minmax(0,1fr) 282px; gap:20px; }
+    .camera-panel { min-width:0; grid-column:1; }
+    .camera-heading { min-height:31px; display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+    h2 { margin:0; font-size:15px; font-weight:560; letter-spacing:-.2px; }
+    .status-pills { display:flex; gap:6px; align-items:center; }
+    .pill { display:inline-flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line); border-radius:20px; padding:5px 9px; background:var(--surface); color:var(--muted); font-size:10px; font-weight:550; white-space:nowrap; min-height:27px; }
+    .pill.ok { color:var(--green); border-color:var(--green-dim); background:var(--green-dim); }
+    .pill.warn { color:var(--amber); border-color:var(--amber-dim); background:var(--amber-dim); }
+    .pill.offline { color:var(--red); border-color:var(--red-dim); background:var(--red-dim); }
+    .dot { width:5px; height:5px; border-radius:50%; background:currentColor; flex:none; }
+    .camera { position:relative; background:#303c38; overflow:hidden; border-radius:13px; border:1px solid #485348; }
+    .camera:before { content:""; display:block; padding-top:57.2%; }
+    .camera-scene { position:absolute; inset:0; width:100%; height:100%; }
+    .camera-top { position:absolute; left:17px; right:17px; top:15px; display:flex; justify-content:space-between; color:#e8eee5; font-size:10px; letter-spacing:.03em; }
+    .camera-label { display:inline-flex; align-items:center; gap:7px; background:rgba(16,24,17,.65); padding:5px 8px; border-radius:5px; }
+    .camera-bottom { position:absolute; left:17px; right:17px; bottom:15px; display:flex; justify-content:space-between; align-items:center; color:#edf2e9; }
+    .camera-bottom .pill { background:rgba(16,24,17,.75); color:#d5e9c7; border-color:rgba(196,221,179,.17); font-size:9px; }
+    .camera-expand { width:32px; height:32px; min-width:32px; min-height:32px; background:rgba(16,24,17,.65); border:0; border-radius:6px; color:#eef3e9; padding:7px; }
+    .camera-offline { position:absolute; inset:0; display:none; align-items:center; justify-content:center; text-align:center; background:rgba(14,20,15,.7); color:#fff; }
+    .camera-offline strong { display:block; font-size:20px; margin-bottom:8px; }
+    .camera.is-offline .camera-offline { display:flex; }
+    .camera.is-offline .camera-scene { opacity:.5; }
+    .control-panel { grid-column:2; grid-row:1 / span 2; display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--line); border-radius:13px; padding:24px 22px; }
+    .control-top { display:flex; justify-content:space-between; align-items:center; }
+    .control-top .icon { color:var(--muted); }
+    .control-status { margin:27px 0 22px; }
+    .control-status strong { display:block; font-size:24px; font-weight:500; line-height:1.15; letter-spacing:-.65px; }
+    .control-status p { margin:8px 0 0; color:var(--muted); font-size:12px; }
+    .gate-button { display:flex; align-items:center; justify-content:center; gap:10px; border:0; border-radius:9px; background:var(--green); color:var(--green-ink); min-height:60px; padding:14px 15px; font-size:16px; font-weight:650; }
+    .gate-button:hover { filter:brightness(1.06); }
+    .gate-button .icon { width:22px; height:22px; }
+    .control-caption { color:var(--quiet); font-size:10px; margin:10px 0 0; text-align:center; }
+    .command-meta { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--muted); margin-top:25px; padding-bottom:22px; border-bottom:1px solid var(--line); }
+    .command-meta strong { color:var(--text); font-weight:500; }
+    .decision { padding-top:22px; }
+    .decision-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+    .decision-heading .eyebrow { margin:0; font-size:9px; }
+    .decision-time { font-size:10px; color:var(--quiet); }
+    .decision-plate { font-size:13px; letter-spacing:.08em; font-weight:600; margin-bottom:6px; }
+    .decision-text { color:var(--muted); font-size:12px; line-height:1.7; margin:0; }
+    .decision-text .icon { width:13px; height:13px; display:inline; vertical-align:-2px; margin-right:3px; color:var(--green); }
+    .control-footer { color:var(--quiet); font-size:10px; border-top:1px solid var(--line); margin-top:auto; padding-top:18px; }
+    .control-footer a { color:var(--muted); text-decoration:none; border-bottom:1px solid var(--line); }
+    .arrivals { grid-column:1; border:1px solid var(--line); border-radius:13px; background:var(--surface); padding:18px 19px 3px; }
+    .section-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:4px; }
+    .text-button { padding:7px 0 7px 8px; border:0; background:none; color:var(--muted); font-size:11px; display:inline-flex; align-items:center; gap:5px; }
+    .text-button .icon { width:13px; height:13px; }
+    .text-button:hover { color:var(--green); }
+    .arrival { display:flex; gap:12px; align-items:center; padding:15px 0; border-top:1px solid var(--line); }
+    .arrival:first-of-type { border-top:0; }
+    .thumb { display:flex; align-items:center; justify-content:center; overflow:hidden; width:56px; height:45px; background:#354236; border:1px solid #455744; border-radius:6px; flex:none; position:relative; }
+    .thumb:after { content:""; position:absolute; bottom:8px; width:22px; height:4px; border-radius:1px; background:#e6e3c5; }
+    .thumb .icon { color:#aebcad; width:36px; height:26px; stroke-width:1.3; }
+    .thumb.secondary { background:#3b4137; border-color:#535744; }
+    .arrival-main { min-width:0; flex:1; }
+    .arrival-title { font-size:13px; font-weight:550; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .arrival-sub { color:var(--muted); font-size:11px; margin-top:3px; }
+    .arrival-sub .plate { letter-spacing:.035em; }
+    .arrival-side { text-align:right; font-size:11px; flex:none; }
+    .arrival-time { color:var(--muted); display:block; margin-top:5px; font-size:10px; }
+    .reason { display:inline-flex; align-items:center; gap:5px; color:var(--green); font-size:10px; }
+    .reason.unknown { color:var(--amber); }
+    .home-footer { display:flex; align-items:center; justify-content:space-between; color:var(--quiet); font-size:10px; margin-top:20px; gap:15px; }
+    .demo-tools { display:flex; align-items:center; gap:10px; }
+    .demo-tools button { border:0; padding:7px 0; background:none; color:var(--muted); font-size:10px; border-bottom:1px dotted var(--quiet); }
+    .mobile-nav { display:none; }
+    .view[hidden] { display:none; }
+    .period-control { display:flex; background:var(--surface); border:1px solid var(--line); padding:4px; border-radius:9px; }
+    .period-control button { color:var(--muted); border:0; padding:7px 12px; font-size:11px; border-radius:5px; background:none; }
+    .period-control button.active { color:var(--text); background:var(--surface-2); }
+    .metric-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:19px; }
+    .metric { border:1px solid var(--line); border-radius:12px; padding:20px 21px; background:var(--surface); }
+    .metric-label { display:flex; align-items:center; justify-content:space-between; color:var(--muted); font-size:11px; }
+    .metric-label .icon { color:var(--quiet); width:16px; height:16px; }
+    .metric-value { margin:10px 0 7px; font-size:38px; letter-spacing:-1.5px; line-height:1; font-weight:500; }
+    .metric-note { font-size:10px; color:var(--muted); }
+    .metric-note .up { color:var(--green); }
+    .metric-note .warm { color:var(--amber); }
+    .metrics-proposal { color:var(--quiet); font-size:10px; margin:-7px 0 18px; }
+    .insights-layout { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(255px,1fr); gap:19px; }
+    .chart-card,.review-card,.note-card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:21px; }
+    .chart-card { grid-column:1 / -1; }
+    .section-subtitle { color:var(--muted); font-size:11px; margin:5px 0 0; }
+    .legend { display:flex; gap:15px; color:var(--muted); font-size:10px; }
+    .legend span { display:flex; align-items:center; gap:6px; }
+    .legend i { width:7px; height:7px; border-radius:2px; background:var(--green); }
+    .legend span:last-child i { background:var(--amber); }
+    .chart-wrap { position:relative; margin-top:23px; padding-left:25px; }
+    .chart-axis { position:absolute; top:0; bottom:23px; left:0; display:flex; flex-direction:column; justify-content:space-between; color:var(--quiet); font-size:9px; }
+    .chart { height:168px; display:flex; align-items:flex-end; gap:8px; position:relative; border-bottom:1px solid var(--line); background:repeating-linear-gradient(to top,transparent 0,transparent calc(33.333% - 1px),var(--line) calc(33.333% - 1px),var(--line) 33.333%); }
+    .bar-slot { flex:1; height:100%; min-width:0; position:relative; display:flex; align-items:flex-end; justify-content:center; padding:0 4px; background:none; border:0; }
+    .bar-slot:before { position:absolute; content:""; inset:0 -2px; background:var(--surface-2); opacity:0; border-radius:5px 5px 0 0; }
+    .bar-slot:hover:before,.bar-slot.selected:before { opacity:.5; }
+    .bar { display:flex; flex-direction:column; justify-content:flex-end; width:100%; max-width:47px; position:relative; z-index:1; height:100%; }
+    .bar-known { background:var(--green); opacity:.85; border-radius:3px 3px 0 0; min-height:0; }
+    .bar-unknown { background:var(--amber); opacity:.88; border-radius:3px 3px 0 0; margin-bottom:2px; min-height:0; }
+    .chart-labels { display:flex; color:var(--quiet); font-size:9px; text-align:center; margin-top:8px; gap:8px; }
+    .chart-labels span { flex:1; min-width:0; }
+    .chart-summary { display:flex; justify-content:space-between; align-items:center; gap:15px; border-top:1px solid var(--line); margin-top:19px; padding-top:15px; color:var(--muted); font-size:11px; }
+    .chart-summary strong { color:var(--text); font-weight:500; }
+    .chart-selected { color:var(--green); }
+    .review-card .arrival { padding:14px 0; }
+    .review-card .arrival:last-child { padding-bottom:0; }
+    .review-card .arrival-sub { font-size:10px; }
+    .review-button { background:none; border:1px solid var(--line); border-radius:6px; color:var(--muted); font-size:10px; padding:7px 10px; }
+    .note-card { display:flex; flex-direction:column; }
+    .split-bar { display:flex; gap:3px; height:7px; margin:21px 0 16px; }
+    .split-bar span:first-child { background:var(--green); border-radius:4px 0 0 4px; }
+    .split-bar span:last-child { background:var(--amber); border-radius:0 4px 4px 0; }
+    .split-row { display:flex; justify-content:space-between; gap:10px; font-size:11px; margin:0 0 12px; color:var(--muted); }
+    .split-row strong { font-weight:500; color:var(--text); }
+    .note-foot { margin:8px 0 0; color:var(--quiet); font-size:10px; line-height:1.65; }
+    .explanation { margin-top:17px; color:var(--muted); font-size:11px; }
+    .explanation summary { cursor:pointer; padding:5px 0; }
+    .explanation p { max-width:850px; font-size:11px; line-height:1.75; color:var(--quiet); }
+    .modal-backdrop { position:fixed; z-index:40; inset:0; background:rgba(7,12,8,.66); display:flex; justify-content:center; align-items:center; padding:22px; }
+    .modal-backdrop[hidden] { display:none; }
+    .modal { background:var(--surface); border:1px solid var(--line); border-radius:16px; width:440px; max-width:100%; padding:25px; box-shadow:var(--shadow); max-height:85vh; overflow:auto; }
+    .modal-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:17px; gap:15px; }
+    .modal h2 { font-size:19px; }
+    .modal .icon-button { min-width:32px; min-height:32px; width:32px; height:32px; padding:7px; }
+    .modal-row { display:flex; align-items:center; justify-content:space-between; gap:15px; border-top:1px solid var(--line); padding:13px 0; font-size:12px; }
+    .modal-row span:first-child { color:var(--muted); }
+    .modal-note { font-size:11px; color:var(--muted); line-height:1.8; }
+    .modal-picture { height:110px; background:var(--surface-2); border-radius:9px; display:flex; align-items:center; justify-content:center; margin-bottom:17px; }
+    .modal-picture .icon { width:100px; height:70px; color:var(--quiet); stroke-width:1; }
+    .toast { position:fixed; z-index:60; bottom:25px; left:calc(50% + 94px); transform:translateX(-50%); max-width:calc(100vw - 35px); width:max-content; padding:13px 19px; background:var(--text); color:var(--bg); border-radius:9px; font-size:12px; box-shadow:var(--shadow); }
+    .toast[hidden] { display:none; }
+    .camera.theatre { position:fixed; z-index:50; inset:5vh 5vw; border-radius:12px; box-shadow:0 0 0 10vw rgba(0,0,0,.8); }
+    .camera.theatre:before { display:none; }
+    @media (min-width:1550px) { .main { margin-right:auto; } .camera:before { padding-top:54%; } }
+    @media (max-width:1180px) {
+      .sidebar { display:none; } .main { margin-left:0; padding:22px 26px; }
+      .topbar { margin-bottom:25px; } .topbar-location { display:none; } .topbar-brand { display:flex; font-size:20px; }
+      .top-nav { display:flex; gap:5px; margin-left:23px; }
+      .topbar-left { display:flex; align-items:center; }
+      .top-nav .nav-button { padding:9px 13px; gap:7px; font-size:12px; }
+      .top-nav .icon { width:16px; height:16px; }
+      .home-layout { grid-template-columns:minmax(0,1fr) 264px; gap:17px; }
+      .page-header { margin-bottom:21px; }
+      .control-panel { padding:22px 19px; }
+      .toast { left:50%; }
+    }
+    @media (min-width:701px) and (max-height:820px) {
+      .main { padding-top:15px; padding-bottom:15px; } .topbar { margin-bottom:18px; }
+      .page-header { margin-bottom:17px; } .page-header .eyebrow { display:none; } h1 { font-size:24px; } .camera:before { padding-top:50%; }
+      .camera-heading { margin-bottom:8px; }
+      .home-layout { gap:15px; } .arrivals { padding:12px 17px 0; } .arrival { padding:10px 0; }
+      .control-status { margin:23px 0 21px; } .control-footer { padding-top:13px; }
+      .home-footer { margin-top:8px; }
+    }
+    @media (max-width:800px) and (min-width:701px) {
+      .main { padding-left:20px; padding-right:20px; }
+      .home-layout { grid-template-columns:minmax(0,1fr) 222px; gap:13px; }
+      .camera-heading { align-items:flex-start; flex-direction:column; gap:9px; }
+      .control-panel { padding:18px 15px; }
+      .arrival-side .reason { display:none; }
+      .camera:before { padding-top:65%; }
+    }
+    @media (max-width:700px) {
+      .main { padding:14px 17px calc(90px + env(safe-area-inset-bottom,0px)); }
+      .topbar { min-height:39px; margin-bottom:23px; gap:5px; }
+      .topbar-brand { font-size:21px; } .brand-mark { width:27px; height:27px; border-radius:7px; }
+      .brand-mark .icon { width:19px; height:19px; }
+      .top-nav { display:none; } .topbar-actions { gap:10px; } .demo-tag { font-size:8px; letter-spacing:.08em; }
+      .topbar .icon-button { min-width:34px; min-height:34px; width:34px; height:34px; padding:7px; }
+      .page-header { margin-bottom:21px; align-items:center; } .eyebrow { font-size:9px; margin-bottom:6px; }
+      h1 { font-size:27px; letter-spacing:-1px; } .header-note { font-size:10px; } .header-note strong { font-size:11px; }
+      .home-layout { display:flex; flex-direction:column; gap:14px; }
+      .camera-heading { margin-bottom:9px; min-height:29px; } .camera-heading h2 { font-size:13px; }
+      .status-pills { gap:4px; } .pill { font-size:9px; padding:5px 7px; min-height:26px; gap:4px; }
+      .camera { border-radius:10px; } .camera:before { padding-top:60%; }
+      .camera-top { top:12px; left:12px; right:12px; font-size:8px; }
+      .camera-bottom { bottom:12px; left:12px; right:12px; }
+      .camera-bottom .pill { font-size:8px; }
+      .control-panel { display:grid; grid-template-columns:1fr auto; gap:0 10px; padding:16px; border-radius:10px; }
+      .control-top { display:none; } .control-status { margin:0 0 13px; } .control-status strong { font-size:16px; letter-spacing:-.25px; }
+      .control-status p { margin-top:4px; font-size:10px; }
+      .gate-button { grid-column:1 / -1; grid-row:2; min-height:55px; font-size:15px; }
+      .control-caption { grid-column:1 / -1; margin:8px 0 0; font-size:9px; }
+      .command-meta { grid-column:2; grid-row:1; margin:0; padding:2px 0 0; border:0; flex-direction:column; justify-content:flex-start; gap:3px; text-align:right; font-size:9px; }
+      .command-meta strong { font-size:10px; } .decision,.control-footer { display:none; }
+      .arrivals { padding:13px 15px 0; border-radius:10px; } .section-heading h2 { font-size:13px; }
+      .text-button { font-size:10px; } .arrival { gap:10px; padding:13px 0; }
+      .thumb { width:45px; height:40px; } .arrival-title { font-size:12px; } .arrival-sub { font-size:10px; }
+      .arrival-side .reason { font-size:9px; } .arrival-time { font-size:9px; }
+      .home-footer { align-items:flex-start; flex-direction:column; gap:8px; margin-top:15px; font-size:9px; }
+      .demo-tools { gap:11px; } .demo-tools button { font-size:9px; }
+      .mobile-nav { position:fixed; z-index:20; bottom:0; left:0; right:0; display:flex; justify-content:center; gap:42px; background:var(--bg); border-top:1px solid var(--line); padding:9px 18px calc(10px + env(safe-area-inset-bottom,0px)); }
+      .mobile-nav .nav-button { display:flex; flex-direction:column; gap:3px; padding:5px 21px; font-size:9px; border-radius:7px; }
+      .mobile-nav .icon { width:20px; height:20px; }
+      .mobile-nav .nav-button.active { background:none; }
+      .insights-header { align-items:flex-start; flex-direction:column; gap:17px; margin-bottom:16px; }
+      .period-control { width:100%; } .period-control button { flex:1; font-size:11px; padding:8px 10px; }
+      .metric-grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:7px; margin-bottom:13px; }
+      .metric { padding:12px 10px; border-radius:9px; } .metric-label { font-size:9px; line-height:1.5; min-height:27px; }
+      .metric-label .icon { display:none; } .metric-value { font-size:29px; margin:6px 0 8px; letter-spacing:-1px; }
+      .metric-note { font-size:8px; line-height:1.5; }
+      .insights-layout { display:flex; flex-direction:column; gap:13px; }
+      .chart-card,.review-card,.note-card { padding:16px; border-radius:10px; }
+      .chart-card .section-heading { align-items:flex-start; flex-direction:column; gap:12px; }
+      .section-subtitle { font-size:10px; margin-top:4px; } .legend { font-size:9px; }
+      .chart-wrap { padding-left:20px; margin-top:21px; } .chart { height:143px; gap:3px; }
+      .bar-slot { padding:0 2px; } .chart-labels { gap:3px; font-size:8px; }
+      .chart-summary { align-items:flex-start; flex-direction:column; gap:7px; font-size:10px; margin-top:14px; padding-top:13px; }
+      .split-bar { margin-top:19px; } .explanation { font-size:10px; margin-top:14px; }
+      .toast { bottom:86px; font-size:11px; width:calc(100vw - 34px); }
+      .modal { padding:20px; border-radius:12px; }
+    }
+    @media (prefers-reduced-motion:no-preference) { button { transition:background .15s,color .15s; } }
+  </style>
+</head>
+<body>
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-gate" viewBox="0 0 24 24"><path d="M4 21V3m16 18V3M4 7h16M4 19h16M8 7v12m4-12v12m4-12v12"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7M5 9v12h14V9m-10 12v-8h6v8"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 3v17h17M8 15v-4m5 4V6m5 9V9"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="m8 7 2-3h4l2 3"/><circle cx="12" cy="13" r="3"/></symbol>
+    <symbol id="i-car" viewBox="0 0 24 24"><path d="m5 8 2-5h10l2 5M3 17V9l2-1h14l2 1v8H3Zm2 0v3m14-3v3M3 12h3m12 0h3M8 15h8"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m5 5 14 14M5 19 19 5"/></symbol>
+    <symbol id="i-command" viewBox="0 0 24 24"><path d="m13 2-8 12h6l-1 8 9-13h-7l1-7Z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/></symbol>
+  </svg>
+  <aside class="sidebar" aria-label="Main navigation">
+    <div class="brand"><span class="brand-mark"><svg class="icon"><use href="#i-gate"/></svg></span>Gate</div>
+    <p class="brand-note">Household gate console</p>
+    <nav class="nav">
+      <button class="nav-button active" data-view="home" aria-current="page"><svg class="icon"><use href="#i-home"/></svg>Home</button>
+      <button class="nav-button" data-view="insights"><svg class="icon"><use href="#i-chart"/></svg>Insights</button>
+    </nav>
+    <div class="sidebar-footer"><div class="hairline"></div><strong>Design study / 02</strong><br>Synthetic data.<br>No live connection.</div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="topbar-location"><svg class="icon"><use href="#i-gate"/></svg><span>Home</span><span class="divider">/</span><span>Main entrance</span></div>
+        <div class="brand topbar-brand"><span class="brand-mark"><svg class="icon"><use href="#i-gate"/></svg></span>Gate</div>
+        <nav class="top-nav" aria-label="Main navigation">
+          <button class="nav-button active" data-view="home" aria-current="page"><svg class="icon"><use href="#i-home"/></svg>Home</button>
+          <button class="nav-button" data-view="insights"><svg class="icon"><use href="#i-chart"/></svg>Insights</button>
+        </nav>
+      </div>
+      <div class="topbar-actions"><span class="demo-tag">Preview · sample data</span><button class="icon-button" id="theme-toggle" aria-label="Switch to light theme" title="Switch theme"><svg class="icon"><use href="#i-sun"/></svg></button></div>
+    </header>
+    <section class="view" id="view-home" aria-label="Home">
+      <div class="page-header">
+        <div><p class="eyebrow">Main entrance</p><h1>Driveway</h1></div>
+        <div class="header-note"><strong>Tuesday, 29 September</strong><span>Evening · demo timeline</span></div>
+      </div>
+      <div class="home-layout">
+        <section class="camera-panel" aria-label="Illustrative camera view">
+          <div class="camera-heading"><h2>Live view</h2><div class="status-pills"><button class="pill ok" id="view-status" data-status-dialog><span class="dot"></span><span>View updating</span></button><button class="pill" id="service-status" data-status-dialog><span class="dot"></span><span>Services active</span></button></div></div>
+          <div class="camera" id="camera">
+            <svg class="camera-scene" viewBox="0 0 1000 572" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Synthetic illustration of a quiet driveway, gateposts and garden; not a camera photograph">
+              <defs>
+                <linearGradient id="sky" x2="0" y2="1"><stop stop-color="#6c7c76"/><stop offset="1" stop-color="#afb1a0"/></linearGradient>
+                <linearGradient id="drive" x2=".3" y2="1"><stop stop-color="#778478"/><stop offset="1" stop-color="#a7ab95"/></linearGradient>
+                <linearGradient id="hedge" x2="1" y2="1"><stop stop-color="#293e32"/><stop offset="1" stop-color="#536247"/></linearGradient>
+                <pattern id="stone" width="34" height="19" patternUnits="userSpaceOnUse"><path d="M0 0h34M0 19h34M17 0v19" stroke="#657261" stroke-width="1" opacity=".45"/></pattern>
+                <pattern id="gravel" width="21" height="17" patternUnits="userSpaceOnUse"><circle cx="4" cy="7" r=".8" fill="#e4e4c9" opacity=".19"/><path d="m14 3 2 1m-5 9 3-1" stroke="#354537" stroke-width="1" opacity=".13"/></pattern>
+              </defs>
+              <path fill="url(#sky)" d="M0 0h1000v572H0z"/>
+              <path fill="#536658" d="m0 92 29-20 21 8 43-24 40 23 16-18 46 27 33-9 47 30 43-23 62 7 25-26 25 15 35-32 52 5 49 20 25-8 34 10 34-5 41 18 28-9 45 25 40-5 48-27 25 8 19-24v117H0z"/>
+              <path fill="#445447" d="M0 129q160-28 307 0t350 2 343 10v85H0z"/>
+              <path fill="#858b7b" d="M0 178h1000v114H0z"/>
+              <path d="M0 184h1000" stroke="#b4b7a0" stroke-width="3" opacity=".75"/>
+              <path d="M0 267h1000" stroke="#515d52" stroke-width="5"/>
+              <path d="m0 318 268-66 361-3 371 75v248H0z" fill="#56664e"/>
+              <path d="m357 273 280-2 304 301H85z" fill="url(#drive)"/>
+              <path d="m357 273 280-2 304 301H85z" fill="url(#gravel)"/>
+              <path d="m352 275-93 127L69 572M643 277l129 153 185 142" fill="none" stroke="#c0c0a2" stroke-width="8"/>
+              <path d="m362 281-83 124L99 572M631 281l132 157 172 134" fill="none" stroke="#5e6f5b" stroke-width="2"/>
+              <path d="m-30 360 150-48 92-110 139 4-47 80-60 13-91 97L0 469Z" fill="url(#hedge)"/>
+              <path d="m-30 336 146-50 91-96 126 2-46 69-69 18-87 92L0 443Z" fill="#506347"/>
+              <path d="m725 210 73 9 73 86 129 29v164l-196-70-39-86-62-71z" fill="url(#hedge)"/>
+              <path d="m737 202 68 2 87 84 108 30v108l-182-60-42-61-49-44z" fill="#506448"/>
+              <path d="m311 296 54 5 11-157-52-3z" fill="#858d74"/>
+              <path d="m365 301 19-13 6-143-14-1z" fill="#626f58"/>
+              <path d="m306 144 16-15 64 3 13 14-24 8z" fill="#a9ac8b"/>
+              <path d="m317 292 48 5 10-142-52-8z" fill="url(#stone)"/>
+              <path d="m653 298 53-4-2-151-53 2z" fill="#8b9279"/>
+              <path d="m706 294 21-8-6-143h-17z" fill="#64705a"/>
+              <path d="m641 148 12-17 63-3 17 14-29 8z" fill="#b5b495"/>
+              <path d="m657 292 45-3-2-139-46 1z" fill="url(#stone)"/>
+              <path d="m380 185 261-3m-261 83 260 1" stroke="#2a3d31" stroke-width="5"/>
+              <path d="m395 184-2 81m23-81-1 81m23-81-1 81m23-81-1 81m23-81-1 81m23-81v81m22-81v81m22-81v81m22-81v81m22-81v81m22-81v81" stroke="#344639" stroke-width="3"/>
+              <path d="M510 182v86" stroke="#253a2c" stroke-width="5"/>
+              <path d="m382 290 250-4 206 186-109 11Z" fill="#354d39" opacity=".13"/>
+              <ellipse cx="58" cy="496" rx="97" ry="85" fill="#344c38"/><ellipse cx="989" cy="482" rx="77" ry="91" fill="#3c543b"/>
+              <path d="m21 494 67 44m-30-64 33 58m-49-82 45 66m-50-23 68 42M941 445l32 52m-2-60 12 72m-41-16 47 25" stroke="#78855c" stroke-width="2" opacity=".6"/>
+              <path d="M0 0h1000v572H0z" fill="#20322a" opacity=".10"/>
+            </svg>
+            <div class="camera-top"><span class="camera-label"><svg class="icon" style="width:12px;height:12px"><use href="#i-camera"/></svg>MAIN ENTRANCE</span><span class="camera-label">20:48:31 · EXAMPLE</span></div>
+            <div class="camera-bottom"><span class="pill">Illustrated frame · no live connection</span><button class="icon-button camera-expand" id="camera-expand" aria-label="Expand illustrative camera view"><svg class="icon"><use href="#i-expand"/></svg></button></div>
+            <div class="camera-offline"><div><strong>View paused</strong><span>Last image retained · simulated connection loss</span></div></div>
+          </div>
+        </section>
+        <section class="control-panel" aria-label="Simulated gate control">
+          <div class="control-top"><h2>Gate control</h2><svg class="icon"><use href="#i-gate"/></svg></div>
+          <div class="control-status"><strong id="control-heading">Manual gate control</strong><p>Send a relay command</p></div>
+          <button class="gate-button" id="gate-button"><svg class="icon"><use href="#i-gate"/></svg><span>Open gate</span><svg class="icon" style="width:17px;margin-left:auto"><use href="#i-arrow"/></svg></button>
+          <p class="control-caption">Demo action · no gate connected</p>
+          <div class="command-meta"><span>Last relay command</span><strong id="last-command">9 min ago</strong></div>
+          <div class="decision">
+            <div class="decision-heading"><p class="eyebrow">Latest decision</p><span class="decision-time">12 min ago</span></div>
+            <div class="decision-plate">TEST123</div>
+            <p class="decision-text"><svg class="icon"><use href="#i-check"/></svg>Matched the allowlist.<br>Repeated sighting; no new pulse.</p>
+          </div>
+          <div class="control-footer">No position sensor connected.<br>A relay command doesn't confirm movement.</div>
+        </section>
+        <section class="arrivals" aria-label="Recent sightings">
+          <div class="section-heading"><h2>Recent sightings</h2><button class="text-button" id="all-sightings">View activity<svg class="icon"><use href="#i-arrow"/></svg></button></div>
+          <div class="arrival">
+            <div class="thumb secondary"><svg class="icon"><use href="#i-car"/></svg></div>
+            <div class="arrival-main"><div class="arrival-title">Unfamiliar vehicle</div><div class="arrival-sub"><span class="plate">DEMO456</span> · 20:46</div></div>
+            <div class="arrival-side"><span class="reason unknown"><span class="dot"></span>No relay pulse</span><span class="arrival-time">2 min ago</span></div>
+          </div>
+          <div class="arrival">
+            <div class="thumb"><svg class="icon"><use href="#i-car"/></svg></div>
+            <div class="arrival-main"><div class="arrival-title">Example household</div><div class="arrival-sub"><span class="plate">TEST123</span> · 20:36</div></div>
+            <div class="arrival-side"><span class="reason"><span class="dot"></span>Allowlisted</span><span class="arrival-time">12 min ago</span></div>
+          </div>
+        </section>
+      </div>
+      <div class="home-footer"><span>All examples are simulated.</span><div class="demo-tools"><span>Try the preview:</span><button id="simulate-outage">Connection lost</button><button id="status-details">Status details</button></div></div>
+    </section>
+    <section class="view" id="view-insights" aria-label="Insights" hidden>
+      <div class="page-header insights-header"><div><p class="eyebrow">Recorded sightings</p><h1>Gate activity</h1></div><div class="period-control" aria-label="Example reporting period"><button class="active" data-period="today" aria-pressed="true">Today</button><button data-period="week" aria-pressed="false">7 days</button><button data-period="month" aria-pressed="false">30 days</button></div></div>
+      <div class="metric-grid">
+        <section class="metric"><div class="metric-label">Recorded sightings<svg class="icon"><use href="#i-camera"/></svg></div><div class="metric-value" id="metric-total">42</div><div class="metric-note" id="metric-total-note"><span class="up">8 more</span> than yesterday</div></section>
+        <section class="metric"><div class="metric-label">Unfamiliar sightings<svg class="icon"><use href="#i-car"/></svg></div><div class="metric-value" id="metric-unknown">10</div><div class="metric-note" id="metric-unknown-note"><span class="warm">4 different plates</span> observed</div></section>
+        <section class="metric"><div class="metric-label">Relay commands<svg class="icon"><use href="#i-command"/></svg></div><div class="metric-value" id="metric-relays">18</div><div class="metric-note" id="metric-relay-note">16 automatic · 2 manual</div></section>
+      </div>
+      <p class="metrics-proposal">Demo metrics · comparisons, distinct-plate counts and complete relay-command totals are proposed additions.</p>
+      <div class="insights-layout">
+        <section class="chart-card" aria-label="Illustrative sightings over time">
+          <div class="section-heading"><div><h2>When things happened</h2><p class="section-subtitle" id="chart-period-label">Recorded sightings, grouped into two-hour windows</p></div><div class="legend"><span><i></i>Allowlisted</span><span><i></i>Unfamiliar</span></div></div>
+          <div class="chart-wrap"><div class="chart-axis" aria-hidden="true"><span id="axis-top">12</span><span id="axis-mid">6</span><span>0</span></div><div class="chart" id="chart" aria-label="Select a time window for its counts"></div><div class="chart-labels" id="chart-labels" aria-hidden="true"></div></div>
+          <div class="chart-summary"><span id="busiest-label">Busiest window <strong>16:00–18:00</strong></span><span class="chart-selected" id="chart-selection" role="status">Select a bar to see the detail</span></div>
+        </section>
+        <section class="review-card">
+          <div class="section-heading"><div><h2>Unfamiliar sightings</h2><p class="section-subtitle">Latest examples in this period</p></div></div>
+          <div class="arrival"><div class="thumb secondary"><svg class="icon"><use href="#i-car"/></svg></div><div class="arrival-main"><div class="arrival-title">DEMO456</div><div class="arrival-sub">20:46 · No relay pulse</div></div><button class="review-button" data-review="DEMO456">Review</button></div>
+          <div class="arrival"><div class="thumb secondary"><svg class="icon"><use href="#i-car"/></svg></div><div class="arrival-main"><div class="arrival-title">SAMPLE7</div><div class="arrival-sub">16:22 · No relay pulse</div></div><button class="review-button" data-review="SAMPLE7">Review</button></div>
+        </section>
+        <section class="note-card">
+          <div class="section-heading"><h2>What the camera recorded</h2></div>
+          <div class="split-bar" aria-hidden="true"><span id="split-known" style="width:76%"></span><span id="split-unknown" style="width:24%"></span></div>
+          <div class="split-row"><span>Allowlisted sightings</span><strong id="split-known-label">32 / 76%</strong></div>
+          <div class="split-row"><span>Unfamiliar sightings</span><strong id="split-unknown-label">10 / 24%</strong></div>
+          <p class="note-foot">A record of what was seen, not an accuracy score. One vehicle can produce several sightings.</p>
+        </section>
+      </div>
+      <details class="explanation"><summary>How to read these numbers</summary><p>All values in this preview are illustrative. Sightings are stored recognition events after the application's existing suppression rules; they are not confirmed visits, vehicle movements or traffic totals. Different plate strings may belong to the same vehicle. Relay commands do not confirm a physical gate opening. A production version must count actual command outcomes, including manual commands, before showing this metric. Comparisons use equal elapsed periods; today is not compared with a complete previous day. No confidence or allowlist percentage is presented as recognition accuracy.</p></details>
+    </section>
+  </main>
+  <nav class="mobile-nav" aria-label="Main navigation"><button class="nav-button active" data-view="home" aria-current="page"><svg class="icon"><use href="#i-home"/></svg>Home</button><button class="nav-button" data-view="insights"><svg class="icon"><use href="#i-chart"/></svg>Insights</button></nav>
+  <div class="modal-backdrop" id="modal-backdrop" hidden><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-header"><h2 id="modal-title">Stream status</h2><button class="icon-button" id="modal-close" aria-label="Close dialog"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="modal-body"></div></section></div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script>
+  (function () {
+    'use strict';
+    // Entirely local synthetic data. This file makes no requests and cannot operate a gate.
+    var periods = {
+      today: { total:42, unknown:10, plates:4, relays:18, manual:2, change:8, compare:'yesterday', max:12, labels:['00','02','04','06','08','10','12','14','16','18','20'], known:[0,0,0,2,5,3,2,3,8,5,4], unfamiliar:[0,0,0,0,1,1,1,1,3,1,2], unit:'two-hour windows · today to 20:48', busiest:'16:00–18:00' },
+      week: { total:268, unknown:57, plates:18, relays:109, manual:13, change:23, compare:'the previous 7 days', max:60, labels:['Wed','Thu','Fri','Sat','Sun','Mon','Tue'], known:[25,27,30,41,29,27,32], unfamiliar:[6,7,8,12,8,6,10], unit:'days', busiest:'Saturday', },
+      month: { total:1084, unknown:236, plates:51, relays:443, manual:48, change:61, compare:'the previous 30 days', max:160, labels:['31–02','03–05','06–08','09–11','12–14','15–17','18–20','21–23','24–26','27–29'], known:[75,88,71,83,98,84,79,106,86,78], unfamiliar:[21,26,17,23,28,21,22,32,25,21], unit:'three-day windows · 31 Aug–29 Sep', busiest:'21–23 September' }
+    };
+    var offline = false;
+    var modalTrigger = null;
+    var toastTimer = null;
+    function $(id) { return document.getElementById(id); }
+    function each(selector, fn) { Array.prototype.forEach.call(document.querySelectorAll(selector),fn); }
+    function openView(name) {
+      each('.view',function (section) { section.hidden = section.id !== 'view-' + name; });
+      each('[data-view]',function (button) { var active = button.getAttribute('data-view') === name; button.classList.toggle('active',active); if (active) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); });
+      window.scrollTo(0,0);
+    }
+    function showToast(message) {
+      clearTimeout(toastTimer); $('toast').textContent = message; $('toast').hidden = false;
+      toastTimer = setTimeout(function () { $('toast').hidden = true; },5000);
+    }
+    function openModal(title,html) { modalTrigger = document.activeElement; $('modal-title').textContent = title; $('modal-body').innerHTML = html; $('modal-backdrop').hidden = false; $('modal-close').focus(); }
+    function closeModal() { $('modal-backdrop').hidden = true; if (modalTrigger && modalTrigger.focus) modalTrigger.focus(); }
+    function showStatus() {
+      var frame = offline ? 'Last sample 24 seconds ago' : 'Example frame loaded &lt; 1s ago';
+      var source = offline ? 'Connection unavailable' : 'Example source age: 1 second';
+      openModal('Stream status','<div class="modal-row"><span>On this screen</span><strong>'+frame+'</strong></div><div class="modal-row"><span>On the Pi</span><strong>'+source+'</strong></div><div class="modal-row"><span>Services</span><strong>'+(offline?'Unknown':'Example: all active')+'</strong></div><p class="modal-note">These are simulated states. In the real application, image freshness and service state are separate checks. An active process does not prove that recognition is making progress.</p><p class="modal-note">Tap either status pill to see these details.</p>');
+    }
+    function renderPeriod(key) {
+      var data = periods[key];
+      $('metric-total').textContent = data.total.toLocaleString(); $('metric-unknown').textContent = data.unknown; $('metric-relays').textContent = data.relays;
+      $('metric-total-note').innerHTML = '<span class="up">'+data.change+' more</span> than '+data.compare;
+      $('metric-unknown-note').innerHTML = '<span class="warm">'+data.plates+' different plates</span> observed';
+      $('metric-relay-note').textContent = (data.relays-data.manual)+' automatic · '+data.manual+' manual';
+      $('chart-period-label').textContent = 'Recorded sightings, grouped into '+data.unit;
+      $('axis-top').textContent = data.max; $('axis-mid').textContent = data.max / 2;
+      $('busiest-label').innerHTML = 'Busiest '+(key==='week'?'day':'window')+' <strong>'+data.busiest+'</strong>';
+      $('chart-selection').textContent = 'Select a bar to see the detail';
+      $('chart').innerHTML = ''; $('chart-labels').innerHTML = '';
+      data.labels.forEach(function (label,index) {
+        var button = document.createElement('button'); button.type = 'button'; button.className = 'bar-slot';
+        button.setAttribute('aria-label',label+(key==='today'?':00':'')+': '+data.known[index]+' allowlisted sightings, '+data.unfamiliar[index]+' unfamiliar sightings');
+        button.innerHTML = '<span class="bar"><span class="bar-unknown" style="height:'+(data.unfamiliar[index]/data.max*100)+'%;'+(!data.unfamiliar[index]?'margin:0;':'')+'"></span><span class="bar-known" style="height:'+(data.known[index]/data.max*100)+'%"></span></span>';
+        button.addEventListener('click',function () { each('.bar-slot',function (bar) { bar.classList.remove('selected'); }); button.classList.add('selected'); $('chart-selection').textContent = (key==='today'?label+':00':label)+' · '+data.known[index]+' allowlisted / '+data.unfamiliar[index]+' unfamiliar'; });
+        $('chart').appendChild(button); var tick = document.createElement('span'); tick.textContent = label; $('chart-labels').appendChild(tick);
+      });
+      var known = data.total-data.unknown; var percentage = Math.round(known/data.total*100);
+      $('split-known').style.width = percentage+'%'; $('split-unknown').style.width = (100-percentage)+'%';
+      $('split-known-label').textContent = known+' / '+percentage+'%'; $('split-unknown-label').textContent = data.unknown+' / '+(100-percentage)+'%';
+      each('[data-period]',function (button) { var selected = button.getAttribute('data-period')===key; button.classList.toggle('active',selected); button.setAttribute('aria-pressed',selected?'true':'false'); });
+    }
+    each('[data-view]',function (button) { button.addEventListener('click',function () { openView(button.getAttribute('data-view')); }); });
+    each('[data-period]',function (button) { button.addEventListener('click',function () { renderPeriod(button.getAttribute('data-period')); }); });
+    each('[data-status-dialog]',function (button) { button.addEventListener('click',showStatus); });
+    $('status-details').addEventListener('click',showStatus);
+    $('theme-toggle').addEventListener('click',function () { var light = document.body.classList.toggle('light'); $('theme-toggle').setAttribute('aria-label','Switch to '+(light?'dark':'light')+' theme'); });
+    $('simulate-outage').addEventListener('click',function () {
+      offline = !offline; $('camera').classList.toggle('is-offline',offline);
+      $('view-status').className = 'pill '+(offline?'offline':'ok'); $('view-status').innerHTML = '<span class="dot"></span><span>'+(offline?'View paused':'View updating')+'</span>';
+      $('service-status').className = 'pill '+(offline?'warn':''); $('service-status').innerHTML = '<span class="dot"></span><span>'+(offline?'Status unknown':'Services active')+'</span>';
+      $('simulate-outage').textContent = offline ? 'Restore connection' : 'Connection lost';
+    });
+    $('gate-button').addEventListener('click',function () { $('last-command').textContent = 'Just now · demo'; $('control-heading').textContent = 'Command simulated.'; showToast('Demo relay command recorded. No request sent; no gate connected.'); setTimeout(function () { $('control-heading').textContent = 'Manual gate control'; },4500); });
+    $('all-sightings').addEventListener('click',function () { openView('insights'); showToast('Preview: explore the recorded sightings below.'); });
+    $('camera-expand').addEventListener('click',function () { var expanded = $('camera').classList.toggle('theatre'); $('camera-expand').setAttribute('aria-label',expanded?'Close expanded illustrative camera view':'Expand illustrative camera view'); });
+    each('[data-review]',function (button) { button.addEventListener('click',function () { var plate = button.getAttribute('data-review'); openModal('Sightings, explained','<div class="modal-picture"><svg class="icon"><use href="#i-car"/></svg></div><div class="modal-row"><span>Observed plate</span><strong>'+plate+'</strong></div><div class="modal-row"><span>Decision</span><strong>Not on the allowlist</strong></div><div class="modal-row"><span>Relay command</span><strong>None requested</strong></div><div class="modal-row"><span>Recorded</span><strong>Today, '+(plate==='DEMO456'?'20:46':'16:22')+'</strong></div><p class="modal-note">Synthetic example. A real review would show the captured image and candidate readings together. An unfamiliar reading does not establish who drove the vehicle.</p>'); }); });
+    $('modal-close').addEventListener('click',closeModal);
+    $('modal-backdrop').addEventListener('click',function (event) { if (event.target === $('modal-backdrop')) closeModal(); });
+    document.addEventListener('keydown',function (event) { if (event.key==='Escape') { if (!$('modal-backdrop').hidden) closeModal(); $('camera').classList.remove('theatre'); $('camera-expand').setAttribute('aria-label','Expand illustrative camera view'); } if (event.key==='Tab' && !$('modal-backdrop').hidden) { event.preventDefault(); $('modal-close').focus(); } });
+    renderPeriod('today');
+  }());
+  </script>
+</body>
+</html>

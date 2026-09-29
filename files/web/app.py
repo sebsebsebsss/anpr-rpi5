@@ -1044,30 +1044,40 @@ def _window_bounds(window):
     return None
 
 
+def _stats_connection():
+    return sqlite3.connect(Path(EVENTS_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+
+
+def _stats_kind_expression():
+    # Match /api/history: older rows may have an owner without a recognised kind.
+    return """CASE
+        WHEN kind IN ('unmatched', 'candidate') AND COALESCE(owner, '') != '' THEN 'recognised'
+        WHEN kind = 'candidate' THEN 'unmatched'
+        ELSE kind END"""
+
+
+def _stats_kind_filter(kinds):
+    # Keep the old candidate argument as an alias for the unfamiliar category.
+    canonical = list(dict.fromkeys("unmatched" if kind == "candidate" else kind for kind in kinds))
+    placeholders = ",".join("?" for _ in canonical)
+    return f"({_stats_kind_expression()}) IN ({placeholders})", canonical
+
+
 def _stats_counts(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        if window:
-            return conn.execute(
-                """
-                SELECT kind, COUNT(*) FROM events
-                WHERE captured_at >= ?
-                GROUP BY kind
-                """,
-                (window.strftime("%Y-%m-%d %H:%M:%S"),),
-            ).fetchall()
+        where = " WHERE captured_at >= ?" if window else ""
+        params = (window.strftime("%Y-%m-%d %H:%M:%S"),) if window else ()
         return conn.execute(
-            """
-            SELECT kind, COUNT(*) FROM events
-            GROUP BY kind
-            """
+            f"SELECT {_stats_kind_expression()} AS category, COUNT(*) FROM events{where} GROUP BY category",
+            params,
         ).fetchall()
     finally:
         conn.close()
 
 
 def _stats_timeseries(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         if window and window >= datetime.now() - timedelta(days=2):
             rows = conn.execute(
@@ -1107,22 +1117,24 @@ def _stats_timeseries(window):
 
 
 def _stats_top_plate(window, kind):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["1=1"]
         params = []
         if kind:
-            where.append("kind = ?")
-            params.append(kind)
+            clause, kinds = _stats_kind_filter([kind])
+            where.append(clause)
+            params.extend(kinds)
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
         query = f"""
-            SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
+            SELECT CASE WHEN UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')
+                THEN 'UNKNOWN' ELSE plate END AS plate_key, COUNT(*) as count
             FROM events
             WHERE {" AND ".join(where)}
-            GROUP BY plate
-            ORDER BY count DESC
+            GROUP BY plate_key
+            ORDER BY count DESC, plate_key ASC
             LIMIT 1
         """
         row = conn.execute(query, params).fetchone()
@@ -1134,19 +1146,20 @@ def _stats_top_plate(window, kind):
 
 
 def _stats_top_plate_multi(window, kinds):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        where = ["kind IN ({})".format(",".join(["?"] * len(kinds)))]
-        params = list(kinds)
+        clause, params = _stats_kind_filter(kinds)
+        where = [clause]
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
         query = f"""
-            SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
+            SELECT CASE WHEN UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')
+                THEN 'UNKNOWN' ELSE plate END AS plate_key, COUNT(*) as count
             FROM events
             WHERE {" AND ".join(where)}
-            GROUP BY plate
-            ORDER BY count DESC
+            GROUP BY plate_key
+            ORDER BY count DESC, plate_key ASC
             LIMIT 1
         """
         row = conn.execute(query, params).fetchone()
@@ -1158,19 +1171,20 @@ def _stats_top_plate_multi(window, kinds):
 
 
 def _stats_top_list(window, kinds, limit=12):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        where = ["kind IN ({})".format(",".join(["?"] * len(kinds)))]
-        params = list(kinds)
+        clause, params = _stats_kind_filter(kinds)
+        where = [clause]
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
         query = f"""
-            SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
+            SELECT CASE WHEN UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')
+                THEN 'UNKNOWN' ELSE plate END AS plate_key, COUNT(*) as count
             FROM events
             WHERE {" AND ".join(where)}
-            GROUP BY plate
-            ORDER BY count DESC
+            GROUP BY plate_key
+            ORDER BY count DESC, plate_key ASC
             LIMIT ?
         """
         rows = conn.execute(query, (*params, limit)).fetchall()
@@ -1184,7 +1198,7 @@ def _stats_busiest_bucket(window):
     bucket = "day"
     if window and window >= now - timedelta(days=2):
         bucket = "hour"
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         if bucket == "hour":
             rows = conn.execute(
@@ -1228,13 +1242,14 @@ def _stats_busiest_bucket(window):
 
 
 def _stats_processing_ms(window, kind=None):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["processing_time_ms IS NOT NULL", "processing_time_ms >= 0"]
         params = []
         if kind:
-            where.append("kind = ?")
-            params.append(kind)
+            clause, kinds = _stats_kind_filter([kind])
+            where.append(clause)
+            params.extend(kinds)
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
@@ -1250,9 +1265,12 @@ def _stats_processing_ms(window, kind=None):
 
 
 def _stats_no_plate(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        where = ["(plate IS NULL OR plate = '')", "kind IN ('recognised', 'unmatched', 'candidate')"]
+        where = [
+            "UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')",
+            "kind IN ('recognised', 'unmatched', 'candidate')",
+        ]
         params = []
         if window:
             where.append("captured_at >= ?")
@@ -1269,7 +1287,7 @@ def _stats_no_plate(window):
 
 
 def _stats_recent_gate_opens(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["kind IN ('recognised', 'manual_open')"]
         params = []
@@ -1286,7 +1304,7 @@ def _stats_recent_gate_opens(window):
 
 
 def _stats_source_breakdown(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["kind IN ('recognised', 'manual_open')"]
         params = []
@@ -1309,7 +1327,7 @@ def _stats_source_breakdown(window):
 
 
 def _stats_manual_open_top_ips(window, limit=5):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["kind = 'manual_open'", "request_ip IS NOT NULL", "request_ip != ''"]
         params = []
@@ -1342,6 +1360,10 @@ def get_stats():
     summary = {kind: count for kind, count in counts}
     total = sum(summary.values())
     timeseries = _stats_timeseries(window)
+    # Include the Pi's civil-time range so charts can retain quiet buckets
+    # without relying on a display's clock or timezone.
+    timeseries["start"] = window.strftime("%Y-%m-%d %H:%M:%S") if window else None
+    timeseries["end"] = now_local_str()
     gate_opens = _stats_recent_gate_opens(window)
     return jsonify(
         {

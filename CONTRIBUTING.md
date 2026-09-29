@@ -23,6 +23,7 @@ node tests/history.js
 node tests/gate_controls.js
 node tests/web_diagnostics.js
 node tests/home_status.js
+node tests/stats.js
 git diff --check
 ```
 
@@ -37,6 +38,10 @@ Chrome; physical iPad testing is still needed for old WebKit behaviour.
 `tests/home_browser.py` checks Home and allowlist editing in Chrome using local
 assets and intercepted synthetic responses. It sends no requests to the Pi.
 Its optional `--output-dir /tmp/gate-ui-preview` screenshots are safe to share.
+
+`tests/stats_browser.py` uses synthetic intercepted responses to check Stats
+across phone/tablet/desktop sizes, themes, period changes and failed requests.
+Neither browser fixture needs a real Pi or HTTPS.
 
 `tests/synthetic_job.py` defaults to a JSON preview. `--enqueue` sends to a real
 worker and can activate the gate if the plate is allowed. Do not use the real

@@ -35,7 +35,7 @@ function setup({ abortAvailable = true } = {}) {
     };
   }
   const nodes = {};
-  ["tab-home", "tab-candidates", "tablet-stream-status", "tablet-system-status", "tablet-timeline-list",
+  ["tab-home", "tab-candidates", "tablet-stream-status", "tablet-system-status", "tablet-source-status", "tablet-service-status", "tablet-timeline-list",
     "home-unfamiliar", "home-unfamiliar-age", "home-decision", "home-decision-age", "home-arrival-status",
     "allowlist-status", "save-plates", "add-plate", "plates-list"].forEach((id) => { nodes[id] = node(id); });
   nodes["tab-home"].classList.add("active");
@@ -140,6 +140,8 @@ function checkFrameTruth() {
   image.onload();
   test.app.renderHomeStatus();
   assert(label() === "View updating", "A loaded image and fresh source should show an updating view");
+  assert(test.nodes["tablet-source-status"].textContent === "Pi frame 1s", "Source age belongs in its own pill");
+  assert(test.nodes["tablet-service-status"].textContent === "Services active", "Service activity belongs in its own pill");
   test.advance(200);
   image.onerror();
   test.app.renderHomeStatus();
@@ -161,6 +163,7 @@ function checkFrameTruth() {
   applySnapshot(test, snapshot({ services: { alprd: "inactive", gate_anpr: "active", stream_jpeg: "active", beanstalkd: "active" } }));
   test.app.renderHomeStatus();
   assert(test.nodes["tablet-system-status"].textContent.includes("Recognition service inactive"), "Service failures must be visible separately from image freshness");
+  assert(test.nodes["tablet-service-status"].textContent === "Service issue", "Service failures must be visible while details are collapsed");
   applySnapshot(test, snapshot({ services_checked_at: 1899999900 }));
   test.app.renderHomeStatus();
   assert(test.nodes["tablet-system-status"].textContent.includes("Service status unavailable"), "An old active-service snapshot cannot be reported as current");
@@ -183,7 +186,7 @@ function checkArrivalExpiryAndDecisions() {
   test.app.renderHomeArrivals();
   assert(card.writes === writes, "Age updates must not rebuild or redownload the arrival preview");
   assert(test.nodes["home-decision"].innerHTML.includes("Relay pulse sent"), "Decision card must use the recorded relay outcome");
-  assert(test.nodes["home-decision-age"].textContent.startsWith("Decision "), "Decision creation time must not be labelled capture time");
+  assert(test.nodes["home-decision-age"].textContent === "just now", "Decision creation time must use the recorded decision age");
   assert(!test.nodes["home-decision"].innerHTML.includes("Gate opened"), "A relay acknowledgement is not physical gate position");
   test.app.state.homeStatusError = true;
   test.advance(199000);
@@ -192,7 +195,7 @@ function checkArrivalExpiryAndDecisions() {
   assert(!test.nodes["home-arrival-status"].hidden, "Old arrival snapshots must be labelled when updates stop");
   test.app.state.homeStatus.decisions_available = false;
   test.app.renderHomeArrivals();
-  assert(test.nodes["home-decision"].textContent === "Decision history unavailable", "Unavailable decisions must not be presented as an empty history");
+  assert(test.nodes["home-decision"].innerHTML.includes("Decision history unavailable"), "Unavailable decisions must not be presented as an empty history");
   assert(test.app.describeDecision({ kind: "recognised", allowed: true }) === "", "Historical captures must not acquire invented decisions");
   const expected = { coalesced: "recent relay pulse", uncertain: "outcome uncertain", failed_before_activation: "No relay pulse sent", not_requested: "No relay pulse requested" };
   Object.keys(expected).forEach((command) => {

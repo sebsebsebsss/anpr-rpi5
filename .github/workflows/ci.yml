@@ -31,6 +31,9 @@ jobs:
       - name: Test home status, arrivals and allowlist feedback
         run: node tests/home_status.js
 
+      - name: Test statistics periods, chart bounds and request failures
+        run: node tests/stats.js
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

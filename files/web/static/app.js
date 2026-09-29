@@ -431,7 +431,7 @@ function createSmoothImageStream(url) {
   return createLegacyStreamImage(url);
 }
 
-async function fetchAllowlistData(url, init = {}) {
+async function fetchJsonWithDeadline(url, init = {}) {
   const controller = typeof AbortController === "undefined" ? null : new AbortController();
   let timer = null;
   const request = async () => {
@@ -453,7 +453,7 @@ async function fetchAllowlistData(url, init = {}) {
       new Promise((resolve, reject) => {
         timer = setTimeout(() => {
           if (controller) controller.abort();
-          reject(new Error("Allowlist request timed out"));
+          reject(new Error("Request timed out"));
         }, 10000);
       }),
     ]);
@@ -464,8 +464,8 @@ async function fetchAllowlistData(url, init = {}) {
 
 async function loadAllowlist() {
   const [platesRes, statusRes] = await Promise.all([
-    fetchAllowlistData("/api/plates"),
-    fetchAllowlistData("/api/allowlist-status"),
+    fetchJsonWithDeadline("/api/plates"),
+    fetchJsonWithDeadline("/api/allowlist-status"),
   ]);
   if (!platesRes.ok || !statusRes.ok) throw new Error("Could not load plates");
   const plates = platesRes.data;
@@ -558,7 +558,7 @@ async function saveAllowlist() {
   }));
   let saved = false;
   try {
-    const resp = await fetchAllowlistData("/api/plates", {
+    const resp = await fetchJsonWithDeadline("/api/plates", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cleaned),
@@ -1745,22 +1745,37 @@ function renderHomeStatus() {
   }
   if (badge.textContent !== label) badge.textContent = label;
   badge.className = `live-badge status-${kind}`;
+  const serviceLabels = { alprd: "Recognition service", gate_anpr: "Gate worker", stream_jpeg: "Frame service", beanstalkd: "Queue" };
+  const servicesCurrent = current && Number.isFinite(snapshot.services_checked_at) && now - snapshot.services_checked_at <= 20;
+  const services = snapshot && snapshot.services || {};
+  const issues = servicesCurrent ? Object.keys(serviceLabels).filter((key) => services[key] !== "active") : [];
+  const sourcePill = document.getElementById("tablet-source-status");
+  if (sourcePill) {
+    sourcePill.hidden = !state.homeSourceIsLocal;
+    const sourceKnown = current && sourceAge !== null;
+    const sourceFresh = sourceKnown && stream.fresh && sourceAge <= threshold;
+    sourcePill.textContent = sourceKnown ? `Pi frame ${Math.floor(sourceAge)}s` : "Source unknown";
+    sourcePill.className = `live-badge status-${sourceKnown ? sourceFresh ? "neutral" : "bad" : "unknown"}`;
+  }
+  const servicePill = document.getElementById("tablet-service-status");
+  if (servicePill) {
+    servicePill.textContent = !servicesCurrent ? "Services unknown" : issues.length ? "Service issue" : "Services active";
+    servicePill.className = `live-badge status-${!servicesCurrent ? "unknown" : issues.length ? "bad" : "neutral"}`;
+  }
   const system = document.getElementById("tablet-system-status");
   if (system) {
     const parts = [frameAge === null ? "No image loaded" : `Image loaded ${Math.floor(frameAge / 1000)}s ago`];
     if (state.homeSourceIsLocal) {
       parts.push(current && sourceAge !== null ? `Pi frame ${Math.floor(sourceAge)}s old` : "Pi frame status unavailable");
     }
-    if (!current || !Number.isFinite(snapshot.services_checked_at) || now - snapshot.services_checked_at > 20) {
+    if (!servicesCurrent) {
       parts.push("Service status unavailable");
     } else {
-      const services = snapshot.services || {};
-      const labels = { alprd: "Recognition service", gate_anpr: "Gate worker", stream_jpeg: "Frame service", beanstalkd: "Queue" };
-      const issues = Object.keys(labels).filter((key) => services[key] !== "active").map((key) => {
-        return `${labels[key]} ${services[key] === "inactive" || services[key] === "failed" ? "inactive" : "unknown"}`;
-      });
-      parts.push(issues.length ? issues.join("; ") : "Services active");
+      parts.push(issues.length ? issues.map((key) => {
+        return `${serviceLabels[key]} ${services[key] === "inactive" || services[key] === "failed" ? "inactive" : "unknown"}`;
+      }).join("; ") : "Services active");
     }
+    parts.push("Service activity does not confirm recognition is progressing.");
     const detail = parts.join(" • ");
     if (system.textContent !== detail) system.textContent = detail;
   }
@@ -1830,7 +1845,7 @@ function renderHomeArrivals() {
     card.hidden = !event;
     if (snapshot && snapshot.decisions_available === false) {
       card.hidden = false;
-      card.textContent = "Decision history unavailable";
+      card.innerHTML = '<summary class="decision-unavailable">Decision history unavailable</summary>';
       state.decisionRenderedKey = "";
     } else if (!event) {
       card.innerHTML = "";
@@ -1838,15 +1853,23 @@ function renderHomeArrivals() {
     } else {
       const key = JSON.stringify([event.id, event.plate, event.detail]);
       if (key !== state.decisionRenderedKey) {
-        card.innerHTML = `<div class="decision-title">Latest ANPR decision</div>
-          <div class="plate">${escapeHtml(event.plate || event.observed_plate || "Plate unreadable")}</div>
-          <div class="decision-note">${escapeHtml(describeDecision(event))}</div>
-          <div id="home-decision-age" class="meta"></div>`;
+        const command = event.detail.decision.relay_command;
+        const outcomes = {
+          pulse_sent: "Pulse sent", coalesced: "Already pulsed", not_requested: "No pulse requested",
+          failed_before_activation: "Pulse failed", uncertain: "Pulse uncertain",
+        };
+        const outcome = outcomes[command] || "Recorded decision";
+        const tone = command === "uncertain" || command === "failed_before_activation" ? "bad" : "neutral";
+        card.innerHTML = `<summary><span class="decision-title">Latest check</span>
+          <span class="plate">${escapeHtml(event.plate || event.observed_plate || "Plate unreadable")}</span>
+          <span class="live-badge status-${tone}">${escapeHtml(outcome)}</span>
+          <span id="home-decision-age" class="meta"></span></summary>
+          <div class="decision-note">${escapeHtml(describeDecision(event))}</div>`;
         state.decisionRenderedKey = key;
       }
       const age = document.getElementById("home-decision-age");
       const elapsed = homeSeenAge(event.seen_at);
-      if (age) age.textContent = elapsed === null ? "" : `Decision ${formatRelativeDelta(elapsed)}`;
+      if (age) age.textContent = elapsed === null ? "" : formatRelativeDelta(elapsed);
     }
   }
   const status = document.getElementById("home-arrival-status");
@@ -1877,7 +1900,7 @@ function renderTabletTimeline() {
       <div class="tablet-thumb">${thumb}</div>
       <div class="tablet-info">
         <div class="plate">${escapeHtml(event.plate || "UNKNOWN")}${event.owner ? ` - ${escapeHtml(event.owner)}` : ""}</div>
-        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))} - <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span></div>
+        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))}<span class="tablet-mobile-age"> · <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span></span></div>
       </div>
       <div class="tablet-time">
         <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}" ${seenAttr}></span>
@@ -2422,323 +2445,220 @@ function formatProcessingTime(ms) {
   return `${Math.round(ms)}ms`;
 }
 
-async function initStats() {
-  const chips = document.querySelectorAll("#tab-stats .chip");
-  const totalEl = document.getElementById("stat-total");
-  const recEl = document.getElementById("stat-recognised");
-  const unmatchEl = document.getElementById("stat-unmatched");
-  const hitRateEl = document.getElementById("stat-hit-rate");
-  const processingEl = document.getElementById("stat-processing");
-  const gateOpensEl = document.getElementById("stat-gate-opens");
-  const manualOpensEl = document.getElementById("stat-manual-opens");
-  const insightLabel = document.getElementById("insight-label");
-  const topPlateEl = document.getElementById("insight-top-plate");
-  const topPlateMetaEl = document.getElementById("insight-top-plate-meta");
-  const topUnmatchedEl = document.getElementById("insight-top-unmatched");
-  const topUnmatchedMetaEl = document.getElementById("insight-top-unmatched-meta");
-  const busiestEl = document.getElementById("insight-busiest");
-  const busiestMetaEl = document.getElementById("insight-busiest-meta");
-  const noPlateEl = document.getElementById("insight-no-plate");
-  const noPlateMetaEl = document.getElementById("insight-no-plate-meta");
-  const topManualIpEl = document.getElementById("insight-top-manual-ip");
-  const topManualIpMetaEl = document.getElementById("insight-top-manual-ip-meta");
-  const lastOpenEl = document.getElementById("insight-last-open");
-  const lastOpenMetaEl = document.getElementById("insight-last-open-meta");
-  const healthDiskEl = document.getElementById("health-disk-free");
-  const healthDiskMetaEl = document.getElementById("health-disk-meta");
-  const healthTempEl = document.getElementById("health-temp");
-  const healthTempMetaEl = document.getElementById("health-temp-meta");
-  const healthMaintenanceEl = document.getElementById("health-maintenance");
-  const healthMaintenanceMetaEl = document.getElementById("health-maintenance-meta");
-  const healthFailuresEl = document.getElementById("health-failures");
-  const healthFailuresMetaEl = document.getElementById("health-failures-meta");
-  const chart = document.getElementById("stats-chart");
-  const chartLabel = document.getElementById("chart-label");
-  const donutEl = document.getElementById("stats-donut");
-  const donutLegend = document.getElementById("stats-donut-legend");
-  const cloudRecognised = document.getElementById("cloud-recognised");
-  const cloudUnmatched = document.getElementById("cloud-unmatched");
-  if (!chart) return;
-  const ctx = chart.getContext("2d");
-  state.statsLoaded = true;
-
-  const renderChart = (series, label) => {
-    ctx.clearRect(0, 0, chart.width, chart.height);
-    if (!series.length) {
-      chartLabel.textContent = "No data yet.";
-      return;
-    }
-    chartLabel.textContent = label;
-    const values = series.map((p) => p.v);
-    const max = Math.max(...values, 1);
-    const padding = 24;
-    const width = chart.width - padding * 2;
-    const height = chart.height - padding * 2;
-    const step = series.length > 1 ? width / (series.length - 1) : width;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#15a05f";
-    ctx.beginPath();
-    series.forEach((point, idx) => {
-      const x = padding + idx * step;
-      const y = chart.height - padding - (point.v / max) * height;
-      if (idx === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    });
-    ctx.stroke();
-    ctx.lineTo(padding + (series.length - 1) * step, chart.height - padding);
-    ctx.lineTo(padding, chart.height - padding);
-    ctx.closePath();
-    const gradient = ctx.createLinearGradient(0, padding, 0, chart.height - padding);
-    gradient.addColorStop(0, "rgba(21, 160, 95, 0.35)");
-    gradient.addColorStop(1, "rgba(21, 160, 95, 0.02)");
-    ctx.fillStyle = gradient;
-    ctx.fill();
-    ctx.fillStyle = "#0b6a3b";
-    series.forEach((point, idx) => {
-      const x = padding + idx * step;
-      const y = chart.height - padding - (point.v / max) * height;
-      ctx.beginPath();
-      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    });
-  };
-
-  const renderDonut = (recognised, unmatched) => {
-    if (!donutEl || !donutLegend) return;
-    const total = recognised + unmatched;
-    const ratio = total ? Math.round((recognised / total) * 100) : 0;
-    const deg = (ratio / 100) * 360;
-    donutEl.style.background = `conic-gradient(var(--accent) 0deg ${deg}deg, rgba(31, 27, 22, 0.15) ${deg}deg 360deg)`;
-    donutLegend.textContent = total
-      ? `${ratio}% recognised • ${100 - ratio}% unmatched`
-      : "--";
-  };
-
-  const renderCloud = (el, items) => {
-    if (!el) return;
-    el.innerHTML = "";
-    if (!items || !items.length) {
-      el.textContent = "No data yet.";
-      return;
-    }
-    const max = Math.max(...items.map((i) => i.count || 0), 1);
-    items.forEach((item) => {
-      const word = document.createElement("span");
-      word.className = "word";
-      const size = 12 + Math.round((item.count / max) * 16);
-      word.style.fontSize = `${size}px`;
-      word.textContent = item.plate || "UNKNOWN";
-      el.appendChild(word);
-    });
-  };
-
-  const formatBytes = (value) => {
-    if (!Number.isFinite(value) || value < 0) return "--";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let size = value;
-    let unit = 0;
-    while (size >= 1024 && unit < units.length - 1) {
-      size /= 1024;
-      unit += 1;
-    }
-    return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
-  };
-
-  const loadStats = async (windowKey) => {
-    setStatus("Loading stats...");
-    const [statsRes, insightsRes, healthRes] = await Promise.all([
-      fetch(`/api/stats?window=${windowKey}`),
-      fetch(`/api/stats/insights?window=${windowKey}`),
-      fetch("/api/service-health"),
-    ]);
-    const data = await statsRes.json();
-    const insightsData = await insightsRes.json();
-    const healthData = await healthRes.json();
-    totalEl.textContent = coalesce(data.total, "--");
-    const recognisedCount = Number(data.counts.recognised || 0);
-    const unmatchedCount = Number(data.counts.unmatched || 0) + Number(data.counts.candidate || 0);
-    const manualOpenCount = Number(data.counts.manual_open || 0);
-    recEl.textContent = recognisedCount;
-    unmatchEl.textContent = unmatchedCount;
-    if (gateOpensEl) gateOpensEl.textContent = Number(data.gate_opens || 0);
-    if (manualOpensEl) manualOpensEl.textContent = manualOpenCount;
-    const total = Number(data.total || 0);
-    const recognised = Number(data.counts.recognised || 0);
-    const anprTotal = recognisedCount + unmatchedCount;
-    if (hitRateEl) {
-      hitRateEl.textContent = anprTotal ? `${((recognised / anprTotal) * 100).toFixed(1)}%` : "--";
-    }
-    const insights = insightsData && insightsData.insights ? insightsData.insights : {};
-    const avgProcessing = insights.avg_processing_ms
-      ? insights.avg_processing_ms.overall
-      : undefined;
-    if (processingEl) {
-      processingEl.textContent = Number.isFinite(avgProcessing)
-        ? formatProcessingTime(avgProcessing)
-        : "--";
-    }
-    const label = data.timeseries.bucket === "hour" ? "Hourly activity" : "Daily activity";
-    renderChart(data.timeseries.series, label);
-    if (insightLabel) {
-      insightLabel.textContent = `Window: ${windowKey}`;
-    }
-    if (topPlateEl && topPlateMetaEl) {
-      const topRecognised = insights.top_recognised || {};
-      const plate = topRecognised.plate;
-      const count = topRecognised.count || 0;
-      topPlateEl.textContent = plate && plate !== "UNKNOWN" ? plate : "--";
-      topPlateMetaEl.textContent = count ? `${count} hits` : "No recognised plates";
-    }
-    if (topUnmatchedEl && topUnmatchedMetaEl) {
-      const topUnmatched = insights.top_unmatched || {};
-      const plate = topUnmatched.plate;
-      const count = topUnmatched.count || 0;
-      topUnmatchedEl.textContent = plate && plate !== "UNKNOWN" ? plate : "--";
-      topUnmatchedMetaEl.textContent = count ? `${count} unmatched reads` : "No unmatched reads";
-    }
-    if (busiestEl && busiestMetaEl) {
-      const busiest = insights.busiest_bucket || {};
-      const bucket = busiest.bucket;
-      const count = busiest.count || 0;
-      const bucketType = busiest.bucket_type === "hour" ? "Busiest hour" : "Busiest day";
-      busiestEl.textContent = bucket || "--";
-      busiestMetaEl.textContent = count ? `${bucketType}: ${count} events` : "No activity";
-    }
-    if (noPlateEl && noPlateMetaEl) {
-      const noPlate = Number(insights.no_plate || 0);
-      noPlateEl.textContent = Number.isFinite(noPlate) ? String(noPlate) : "--";
-      noPlateMetaEl.textContent = anprTotal
-        ? `${((noPlate / anprTotal) * 100).toFixed(1)}% of ANPR reads`
-        : "--";
-    }
-    if (topManualIpEl && topManualIpMetaEl) {
-      const topManual = (insights.top_manual_ips || [])[0] || {};
-      topManualIpEl.textContent = topManual.request_ip || "--";
-      topManualIpMetaEl.textContent = topManual.count ? `${topManual.count} manual opens` : "No manual opens";
-    }
-    if (lastOpenEl && lastOpenMetaEl) {
-      const latestOpen = insights.latest_gate_open || {};
-      lastOpenEl.textContent = latestOpen.captured_at
-        ? formatDayTimeLabel(latestOpen.captured_at)
-        : "--";
-      if (latestOpen.kind === "manual_open") {
-        lastOpenMetaEl.textContent = latestOpen.request_ip
-          ? `Manual open from ${latestOpen.request_ip}`
-          : "Manual open";
-      } else if (latestOpen.captured_at) {
-        lastOpenMetaEl.textContent = `${latestOpen.kind || "gate open"} • ${formatRelative(latestOpen.captured_at)}`;
-      } else {
-        lastOpenMetaEl.textContent = "No gate opens";
-      }
-    }
-    if (healthDiskEl && healthDiskMetaEl) {
-      const disk = healthData.disk || {};
-      healthDiskEl.textContent = Number.isFinite(disk.free_pct) ? `${disk.free_pct.toFixed(1)}%` : "--";
-      healthDiskMetaEl.textContent = Number.isFinite(disk.free_bytes)
-        ? `${formatBytes(disk.free_bytes)} free`
-        : "--";
-    }
-    if (healthTempEl && healthTempMetaEl) {
-      healthTempEl.textContent = Number.isFinite(healthData.temperature_c)
-        ? `${healthData.temperature_c.toFixed(1)}C`
-        : "--";
-      const services = healthData.services || {};
-      healthTempMetaEl.textContent = `web:${services.gate_anpr_web || "?"} worker:${services.gate_anpr || "?"} alprd:${services.alprd || "?"}`;
-    }
-    if (healthMaintenanceEl && healthMaintenanceMetaEl) {
-      const maintenance = healthData.maintenance || {};
-      healthMaintenanceEl.textContent = maintenance.last_success
-        ? maintenance.stale
-          ? "Stale"
-          : "OK"
-        : "--";
-      if (maintenance.last_success) {
-        const age = Number.isFinite(maintenance.age_hours) ? `${maintenance.age_hours}h ago` : maintenance.last_success;
-        healthMaintenanceMetaEl.textContent = `Last prune ${age}`;
-      } else {
-        healthMaintenanceMetaEl.textContent = maintenance.last_error || "No successful maintenance run";
-      }
-    }
-    if (healthFailuresEl && healthFailuresMetaEl) {
-      const failed = Array.isArray(healthData.failed_units) ? healthData.failed_units : [];
-      healthFailuresEl.textContent = String(failed.length);
-      healthFailuresMetaEl.textContent = failed.length ? failed.join(", ") : "No failed units";
-    }
-    renderDonut(recognisedCount, unmatchedCount);
-    renderCloud(cloudRecognised, insights.top_recognised_list || []);
-    renderCloud(cloudUnmatched, insights.top_unmatched_list || []);
-    updateStatusTimestamp();
-    state.timelineWindow = windowKey === "24h" ? "7d" : windowKey;
-  };
-
-  chips.forEach((chip) => {
-    chip.addEventListener("click", () => {
-      chips.forEach((btn) => btn.classList.remove("active"));
-      chip.classList.add("active");
-      loadStats(chip.dataset.window);
-    });
-  });
-
-  const topPlateCard = document.getElementById("insight-top-plate-card");
-  if (topPlateCard) {
-    topPlateCard.addEventListener("click", () => {
-      showHistoryForKinds(["recognised"]);
-    });
-  }
-  const topUnmatchedCard = document.getElementById("insight-top-unmatched-card");
-  if (topUnmatchedCard) {
-    topUnmatchedCard.addEventListener("click", () => {
-      showHistoryForKinds(["unmatched"]);
-    });
-  }
-  const busiestCard = document.getElementById("insight-busiest-card");
-  if (busiestCard) {
-    busiestCard.addEventListener("click", () => {
-      setActiveTab("timeline");
-      fetchTimeline({ page: 1 });
-    });
-  }
-
-  const resizeCanvas = () => {
-    const parent = chart.parentElement;
-    const containerWidth = parent && parent.clientWidth ? parent.clientWidth : 600;
-    chart.width = Math.max(240, containerWidth - 16);
-    chart.height = 220;
-  };
-  resizeCanvas();
-  window.addEventListener("resize", () => {
-    resizeCanvas();
-    const active = document.querySelector("#tab-stats .chip.active");
-    if (active) {
-      loadStats(active.dataset.window);
-    }
-  });
-
-  loadStats("24h");
-
-  chart.addEventListener("click", (event) => {
-    const rect = chart.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const containerWidth = chart.width;
-    const padding = 24;
-    const active = document.querySelector("#tab-stats .chip.active");
-    if (!active) return;
-    fetch(`/api/stats?window=${active.dataset.window}`)
-      .then((resp) => resp.json())
-      .then((data) => {
-        const series = data.timeseries.series || [];
-        if (!series.length) return;
-        const barWidth = (containerWidth - padding * 2) / series.length;
-        const index = Math.floor((x - padding) / barWidth);
-        if (index < 0 || index >= series.length) return;
-        setActiveTab("timeline");
-      })
-      .catch(() => {});
-  });
+function statsCivilTime(value) {
+  // Treat Pi-local labels as civil time, independent of the screen's timezone.
+  const parts = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+  return parts ? Date.UTC(+parts[1], +parts[2] - 1, +parts[3], +(parts[4] || 0), +(parts[5] || 0)) : NaN;
 }
+
+function statsChartBuckets(timeseries) {
+  const series = (timeseries && timeseries.series || []).filter((point) =>
+    Number.isFinite(statsCivilTime(point.t)) && Number.isFinite(point.v) && point.v >= 0);
+  const unit = timeseries && timeseries.bucket === "hour" ? 3600000 : 86400000;
+  let start = statsCivilTime(timeseries && timeseries.start);
+  let end = statsCivilTime(timeseries && timeseries.end);
+  if (!Number.isFinite(start)) start = series.length ? Math.min(...series.map((p) => statsCivilTime(p.t))) : end;
+  if (!Number.isFinite(end)) end = series.length ? Math.max(...series.map((p) => statsCivilTime(p.t))) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  start = Math.floor(start / unit) * unit;
+  end = Math.floor(end / unit) * unit;
+  // Bound DOM work even for years of retained data. Longer spans aggregate
+  // adjacent civil-time buckets; they never discard the quiet periods.
+  const span = Math.floor((end - start) / unit) + 1;
+  const group = Math.max(1, Math.ceil(span / 60));
+  const width = group * unit;
+  const points = [];
+  for (let t = start; t <= end; t += width) points.push({ time: t, end: Math.min(t + width - unit, end), value: 0, unit });
+  series.forEach((point) => {
+    const index = Math.floor((statsCivilTime(point.t) - start) / width);
+    if (index >= 0 && index < points.length) points[index].value += point.v;
+  });
+  return points;
+}
+
+function statsBucketLabel(point, compact = false) {
+  const format = (value) => {
+    const date = new Date(value);
+    const day = `${date.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getUTCMonth()]}`;
+    return point.unit === 3600000 ? `${compact ? "" : day + ", "}${String(date.getUTCHours()).padStart(2, "0")}:00` : day;
+  };
+  return point.end === point.time ? format(point.time) : `${format(point.time)}–${format(point.end)}`;
+}
+
+async function initStats() {
+  const chart = document.getElementById("stats-chart");
+  if (!chart) return;
+  state.statsLoaded = true;
+  const chips = document.querySelectorAll("#tab-stats .chip");
+  let requestId = 0;
+  let chartPoints = [];
+  let lastTimeseries = null;
+  let loadedWindow = null;
+  const text = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  const periods = { "24h": "the last 24 hours", "7d": "the last 7 days", "30d": "the last 30 days", all: "retained history" };
+  const error = (message) => {
+    const el = document.getElementById("stats-error");
+    if (el) { el.hidden = !message; el.textContent = message; }
+  };
+  const renderChart = (timeseries) => {
+    lastTimeseries = timeseries;
+    chartPoints = statsChartBuckets(timeseries);
+    const max = Math.max(1, ...chartPoints.map((p) => p.value));
+    const ceiling = Math.max(2, Math.ceil(max / 2) * 2);
+    const width = Math.max(300, Math.min(900, chart.clientWidth || window.innerWidth || 800));
+    chart.setAttribute("viewBox", `0 0 ${width} 240`);
+    const left = 36, right = width - 18, top = 18, bottom = 198;
+    const step = (right - left) / Math.max(chartPoints.length, 1);
+    let markup = `<title>Recorded activity by time, including manual commands</title>`;
+    [0, ceiling / 2, ceiling].forEach((value) => {
+      const y = bottom - value / ceiling * (bottom - top);
+      markup += `<line class="stats-gridline" x1="${left}" y1="${y}" x2="${right}" y2="${y}" />`;
+      markup += `<text class="stats-axis" x="${left - 10}" y="${y + 4}" text-anchor="end">${value}</text>`;
+    });
+    chartPoints.forEach((point, index) => {
+      const height = point.value ? point.value / ceiling * (bottom - top) : 2;
+      const label = `${statsBucketLabel(point)}: ${point.value} recorded ${point.value === 1 ? "event" : "events"}`;
+      markup += `<rect data-index="${index}" tabindex="0" role="button" aria-label="${escapeHtml(label)}" class="stats-bar${point.value ? "" : " stats-bar-empty"}" x="${left + index * step + step * .12}" y="${bottom - height}" width="${Math.max(1, step * .76)}" height="${height}" rx="2"><title>${escapeHtml(label)}</title></rect>`;
+      const labelEvery = Math.max(1, Math.ceil(chartPoints.length / (width < 480 ? 3 : 5)));
+      if (index % labelEvery === 0 || index === chartPoints.length - 1 && index % labelEvery > 1) {
+        const anchor = index === 0 ? "start" : index === chartPoints.length - 1 ? "end" : "middle";
+        markup += `<text class="stats-axis" x="${left + index * step + step / 2}" y="224" text-anchor="${anchor}">${escapeHtml(statsBucketLabel(point, true))}</text>`;
+      }
+    });
+    chart.innerHTML = markup;
+    const populated = chartPoints.some((point) => point.value > 0);
+    const label = timeseries && timeseries.bucket === "hour" ? "Hourly" : "Daily";
+    const grouped = chartPoints.length && chartPoints[0].end !== chartPoints[0].time;
+    text("chart-label", `${grouped ? "Grouped daily" : label} records · Pi local time`);
+    text("stats-chart-reading", populated ? "Select a bar for its count. Includes manual commands." : "No recorded activity in this period.");
+  };
+  const renderRanking = (id, items, empty) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const rows = (Array.isArray(items) ? items : []).slice(0, 8);
+    const maximum = Math.max(1, ...rows.map((item) => Number(item.count) || 0));
+    el.innerHTML = rows.length ? rows.map((item) => {
+      const count = Math.max(0, Number(item.count) || 0);
+      const plate = item.plate && item.plate !== "UNKNOWN" ? item.plate : "Unreadable";
+      return `<div class="stats-ranking-row"><span class="stats-registration">${escapeHtml(plate)}</span><span class="stats-track" aria-hidden="true"><span style="width:${count / maximum * 100}%"></span></span><span class="stats-count">${count}</span></div>`;
+    }).join("") : `<div class="stats-empty">${escapeHtml(empty)}</div>`;
+  };
+  const renderHealth = (data) => {
+    if (!data) {
+      text("stats-health-summary", "Status unavailable");
+      ["health-temp", "health-disk-free", "health-maintenance", "health-failures"].forEach((id) => text(id, "—"));
+      ["health-temp-meta", "health-disk-meta", "health-maintenance-meta", "health-failures-meta"].forEach((id) => text(id, "Status unavailable"));
+      return;
+    }
+    const disk = data.disk || {}, maintenance = data.maintenance || {};
+    const failed = Array.isArray(data.failed_units) ? data.failed_units : [];
+    const temp = Number.isFinite(data.temperature_c) ? `${data.temperature_c.toFixed(1)}°C` : "Unavailable";
+    text("health-temp", temp);
+    const services = data.services || {};
+    const active = ["gate_anpr_web", "gate_anpr", "alprd", "stream_jpeg"].every((name) => services[name] === "active");
+    text("health-temp-meta", active ? "Services active; progress is not measured" : "One or more services inactive or unknown");
+    text("health-disk-free", Number.isFinite(disk.free_pct) ? `${disk.free_pct.toFixed(0)}% free` : "Unavailable");
+    text("health-disk-meta", Number.isFinite(disk.free_bytes) ? `${(disk.free_bytes / 1073741824).toFixed(1)} GB available` : "Disk status unavailable");
+    text("health-maintenance", maintenance.last_success ? maintenance.stale ? "Overdue" : "Up to date" : "Unknown");
+    text("health-maintenance-meta", maintenance.last_success ? `Last cleanup ${Number.isFinite(maintenance.age_hours) ? maintenance.age_hours + "h ago" : maintenance.last_success}` : "No successful cleanup recorded");
+    text("health-failures", String(failed.length));
+    text("health-failures-meta", failed.length ? failed.join(", ") : "No failed services reported");
+    text("stats-health-summary", `${temp} · ${failed.length ? failed.length + " failed services" : active ? "Services active" : "Check services"}`);
+  };
+  const loadStats = async (windowKey) => {
+    const current = ++requestId;
+    error("");
+    text("stats-summary", `Loading ${periods[windowKey] || "activity"}…`);
+    // Remove prior-period values immediately: a failed new request must not
+    // leave yesterday's totals looking like this month's data.
+    ["stat-total", "stat-recognised", "stat-unmatched", "stat-manual-opens", "stat-processing", "insight-no-plate"].forEach((id) => text(id, "—"));
+    text("insight-no-plate-meta", "");
+    chartPoints = [];
+    lastTimeseries = null;
+    chart.innerHTML = "";
+    text("chart-label", "Loading activity…");
+    text("stats-chart-reading", "");
+    renderRanking("stats-recognised-list", [], "Loading…");
+    renderRanking("stats-unmatched-list", [], "Loading…");
+    const health = fetchJsonWithDeadline("/api/service-health").then((response) => {
+      if (current === requestId) renderHealth(response.ok ? response.data : null);
+    }).catch(() => { if (current === requestId) renderHealth(null); });
+    try {
+      const responses = await Promise.all([
+        fetchJsonWithDeadline(`/api/stats?window=${encodeURIComponent(windowKey)}`),
+        fetchJsonWithDeadline(`/api/stats/insights?window=${encodeURIComponent(windowKey)}`),
+      ]);
+      if (current !== requestId) return;
+      if (!responses.every((response) => response.ok)) throw new Error("Statistics unavailable");
+      const data = responses[0].data, insightData = responses[1].data;
+      if (!data || !data.counts || !data.timeseries || !insightData || !insightData.insights) throw new Error("Invalid statistics");
+      const insights = insightData.insights;
+      const rec = Number(data.counts.recognised || 0);
+      const unmatched = Number(data.counts.unmatched || 0) + Number(data.counts.candidate || 0);
+      const manual = Number(data.counts.manual_open || 0);
+      text("stat-total", rec + unmatched);
+      text("stat-recognised", rec);
+      text("stat-unmatched", unmatched);
+      text("stat-manual-opens", manual);
+      text("stats-summary", rec + unmatched || manual
+        ? `${rec} recognised detections, ${unmatched} unmatched captures and ${manual} manual commands in ${periods[windowKey]}.`
+        : `No recorded activity in ${periods[windowKey]}. New captures will appear here.`);
+      const processing = insights.avg_processing_ms && insights.avg_processing_ms.overall;
+      text("stat-processing", Number.isFinite(processing) ? formatProcessingTime(processing) : "Unavailable");
+      text("insight-no-plate", Number(insights.no_plate || 0));
+      text("insight-no-plate-meta", "No registration returned; not an accuracy score");
+      renderChart(data.timeseries);
+      renderRanking("stats-recognised-list", insights.top_recognised_list, "No recognised detections in this period.");
+      renderRanking("stats-unmatched-list", insights.top_unmatched_list, "No unmatched captures in this period.");
+      loadedWindow = windowKey;
+      updateStatusTimestamp();
+    } catch (err) {
+      if (current !== requestId) return;
+      text("stats-summary", "Activity could not be loaded.");
+      text("chart-label", "Activity unavailable");
+      error("Could not load this period. Select it again to retry; no gate controls are affected.");
+      renderRanking("stats-recognised-list", [], "Activity unavailable.");
+      renderRanking("stats-unmatched-list", [], "Activity unavailable.");
+    }
+    // Health is independent; an unavailable maintenance check must not hide
+    // already loaded activity, and its deadline cannot lock the whole page.
+    await health;
+  };
+  chips.forEach((chip) => chip.addEventListener("click", () => {
+    chips.forEach((button) => { button.classList.remove("active"); button.setAttribute("aria-pressed", "false"); });
+    chip.classList.add("active");
+    chip.setAttribute("aria-pressed", "true");
+    loadStats(chip.dataset.window);
+  }));
+  [["insight-top-plate-card", "recognised"], ["insight-top-unmatched-card", "unmatched"]].forEach(([id, kind]) => {
+    const card = document.getElementById(id);
+    if (card) card.addEventListener("click", () => {
+      if (loadedWindow) {
+        state.eventsWindow = loadedWindow;
+        const selector = document.getElementById("history-window");
+        if (selector) selector.value = loadedWindow;
+      }
+      showHistoryForKinds([kind]);
+    });
+  });
+  const readBar = (event) => {
+    if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+    const target = event.target.closest ? event.target.closest("[data-index]") : null;
+    if (!target) return;
+    const point = chartPoints[Number(target.getAttribute("data-index"))];
+    if (point) {
+      if (event.type === "keydown") event.preventDefault();
+      text("stats-chart-reading", `${statsBucketLabel(point)} · ${point.value} recorded ${point.value === 1 ? "event" : "events"}`);
+    }
+  };
+  chart.addEventListener("click", readBar);
+  chart.addEventListener("keydown", readBar);
+  window.addEventListener("resize", () => {
+    if (lastTimeseries && isTabActive("stats")) renderChart(lastTimeseries);
+  });
+  loadStats("24h");
+}
+
 
 initTheme();
 if (isAdmin) {

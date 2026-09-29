@@ -43,6 +43,7 @@ def main():
         "api_error": False,
         "service_inactive": False,
         "decisions_available": True,
+        "legacy_layout": False,
         "save": "validation",
         "plates": [{"owner": "Example household", "plates": ["TEST123"]}],
     }
@@ -151,6 +152,10 @@ def main():
         local = STATIC / (filename or path.removeprefix("/static/").lstrip("/"))
         if local.is_file() and local.resolve().is_relative_to(STATIC.resolve()):
             content = local.read_bytes().replace(b"__GATE_API_SHARED_SECRET__", b"synthetic-test-secret")
+            if local.name == "styles.css" and fixture["legacy_layout"]:
+                # Exercise the legacy sizing fallback in Chrome without claiming
+                # that a user agent string emulates the old WebKit engine.
+                content = content.replace(b"@supports not (aspect-ratio: 1 / 1)", b"@supports (display: grid)")
             route.fulfill(body=content, content_type=mimetypes.guess_type(local.name)[0] or "application/octet-stream")
             return
         # Optional absent icons should not trigger any external network access.
@@ -175,7 +180,7 @@ def main():
 
         def screenshot(name):
             require(page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "horizontal overflow")
-            if page.viewport_size["width"] == 1024:
+            if page.url.endswith("/fullscreen") or page.viewport_size["width"] >= 900:
                 require(
                     page.evaluate(
                         "document.querySelector('.tablet-grid').getBoundingClientRect().bottom <= innerHeight"
@@ -189,6 +194,14 @@ def main():
         page.goto("http://gate.test/", wait_until="domcontentloaded")
         ready()
         screenshot("home-ipad.png")
+        page.locator(".home-health-details summary").click()
+        require(page.locator("#tablet-system-status").is_visible(), "status disclosure did not open on tap")
+        page.locator(".home-health-details summary").click()
+        require(page.locator("#tablet-system-status").is_hidden(), "status details should be collapsed initially")
+        require(page.locator("#home-decision .decision-note").is_hidden(), "decision prose should be collapsed")
+        page.locator("#home-decision summary").click()
+        require(page.locator("#home-decision .decision-note").is_visible(), "decision explanation did not open")
+        page.locator("#home-decision summary").click()
         fixture["frame_error"] = True
         page.wait_for_function("document.getElementById('tablet-stream-status').textContent === 'View interrupted'")
         fixture["frame_error"] = False
@@ -219,6 +232,44 @@ def main():
         page.goto("http://gate.test/", wait_until="domcontentloaded")
         ready()
         screenshot("home-phone.png")
+        for width, height, path, name in (
+            (390, 664, "/", "phone-browser"),
+            (320, 568, "/", "small-phone"),
+            (1024, 748, "/", "ipad"),
+            (800, 480, "/fullscreen", "kiosk-small"),
+            (1024, 600, "/fullscreen", "kiosk-wide"),
+            (1280, 800, "/fullscreen", "kiosk-large"),
+        ):
+            page.set_viewport_size({"width": width, "height": height})
+            page.goto("http://gate.test" + path, wait_until="domcontentloaded")
+            ready()
+            for theme in ("light", "dark"):
+                page.evaluate("theme => document.body.classList.toggle('theme-dark', theme === 'dark')", theme)
+                screenshot("home-" + name + "-" + theme + ".png")
+            require(
+                page.locator("#open-gate-tablet").bounding_box()["y"]
+                + page.locator("#open-gate-tablet").bounding_box()["height"]
+                <= height,
+                "gate action is below the initial viewport",
+            )
+            require(
+                page.locator("#tablet-stream-frame img").evaluate(
+                    "image => getComputedStyle(image).objectFit === 'contain'"
+                ),
+                "camera image must remain uncropped",
+            )
+        fixture["legacy_layout"] = True
+        for width, height, path in ((1024, 748, "/"), (800, 480, "/fullscreen"), (390, 664, "/")):
+            page.set_viewport_size({"width": width, "height": height})
+            page.goto("http://gate.test" + path, wait_until="domcontentloaded")
+            ready()
+            require(
+                page.locator("#tablet-stream-frame").bounding_box()["height"] >= 100,
+                "legacy image sizing fallback collapsed the camera",
+            )
+            screenshot("home-legacy-layout-" + str(width) + ".png")
+        fixture["legacy_layout"] = False
+        page.set_viewport_size({"width": 390, "height": 844})
 
         page.goto("http://gate.test/admin", wait_until="domcontentloaded")
         page.locator(".owner-input").fill("Edited example owner")
@@ -242,7 +293,7 @@ def main():
         counters == {"blocked_gate_requests": 0, "unexpected_requests": 0, "page_errors": 0},
         "unexpected browser request/error",
     )
-    print(json.dumps({"ok": True, "mocked_checks": 12, **counters}))
+    print(json.dumps({"ok": True, "mocked_checks": 24, **counters}))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 # Gate ANPR roadmap
 
-This is the canonical backlog for this small LAN/Pi project. Keep stable IDs,
+This records options and priorities for this small LAN/Pi project. It is not a
+commitment to implement every idea. Keep stable IDs,
 update status and verification notes with each completed change, and link any
 GitHub issues here rather than maintaining a second independent list.
 Real captures, credentials, domains and household details belong in local files.
@@ -23,22 +24,42 @@ hardware work. These are relative sizes, not delivery estimates.
 
 ## Next reliability and recognition work
 
-Recommended next batch: REL-01 and REL-02 first, then REL-03/REL-04. Build the
-private replay harness (REC-01) before changing recognition policy or reducing
-analysis CPU. Smaller preview profiles (PERF-03) can be compared independently.
+The current review branch prioritises UX-10/UX-11 below. After choosing the
+visual direction, the useful reliability batch is REL-01, REL-02 and REL-04.
+REL-03 becomes worthwhile when simultaneous vehicles matter at this site.
+
+For performance, start with the existing detection mask (PERF-01), one smaller
+preview profile (PERF-03), and an OCR thread-limit comparison (PERF-05). Use a
+small private replay set (REC-01), then expand it only as needed. Measurements,
+limits and primary-source references are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+Keep storage bounds and dependency upkeep. Defer native apps, new video
+transport, adaptive recognition, direction/presence inference and elaborate
+release/recovery infrastructure until a household need justifies them.
+Vehicle-history backups remain optional.
+
+| ID | Status / effort | Current design work | Acceptance criteria |
+|---|---|---|---|
+| UX-10 | Review branch / S/M | Compact status and layouts per screen | Status pills with touch-accessible detail; phone gate control in first viewport; uncropped camera; tablet and kiosk fit; light/dark and legacy sizing checked. |
+| UX-11 | Review branch / M | Useful activity statistics | Labelled time/count axes retain quiet periods; ranked counts replace word cloud; consistent legacy categories; no accuracy/visit/physical-open claims; errors, mobile and empty states work. |
+
+A separate interactive alternative lives in [docs/design/alternative.html](docs/design/alternative.html).
+Its proposed comparison/relay-total metrics are demo-only. UX-10/UX-11 are
+implemented for review on `design/device-layout-and-insights`; they are not yet
+marked delivered to the Pi.
 
 | ID | Priority / effort | Improvement | Acceptance criteria / dependency |
 |---|---|---|---|
 | REL-01 | High / M | Persist automatic-opening cooldown | Restarting the worker cannot permit a second pulse inside the configured vehicle cooldown; cover uncertain actuation outcomes. |
 | REL-02 | High / M | Monitor real recognition progress | Detect a dead child, stalled input or stalled processing even when the parent and preview stay healthy; an empty driveway is not a fault. |
-| REL-03 | High / M | Process multiple detected vehicles | Handle each vehicle's candidate list independently; an unknown first vehicle cannot hide an allowed second vehicle; bound relay commands per frame. |
+| REL-03 | Conditional / M | Process multiple detected vehicles | Handle each vehicle's candidate list independently; an unknown first vehicle cannot hide an allowed second vehicle; bound relay commands per frame. |
 | REL-04 | High / M | Separate actuation from persistence/notification retries | A database/notification failure after a pulse cannot repeat the pulse or silently lose retryable work. |
-| REC-01 | High / M | Offline recognition replay | Replay labelled images/clips and captured jobs with GPIO/network notifications disabled; compare missed arrivals, wrong decisions and capture-to-command latency. Keep footage private. |
+| REC-01 | Before recognition tuning / S/M | Small offline recognition replay | Start with a representative labelled private image/job set with GPIO/network notifications disabled; compare missed arrivals, wrong decisions and capture-to-command latency. Keep footage private. |
 | REC-02 | High / M | Explicit recognition ambiguity policy | Prefer exact identity, reject equal fuzzy ties and expose confusable collisions; compare proposed decisions in shadow mode before changing live policy. Depends on REC-01. |
 | REL-05 | Medium / M | Test ordinary outage recovery | Simulated camera loss, interrupted JPEGs and network-late boot recover with bounded retries and clear UI status. |
 | REL-06 | Medium / S/M | Bound disposable capture storage | Daily persistent cleanup enforces age/size/free-space limits, catches up after downtime and preserves configuration. |
-| REL-07 | Medium / M | Known-working release rollback | Stage code and dependencies together, validate before switching, retain the previous release and test rollback. |
-| REL-08 | Medium / S/M | Complete configuration recovery | Include OpenALPR settings and deployed versions in small private backups; prove restore; optional copy to an existing controller/NAS. Vehicle history stays optional. |
+| REL-07 | Deferred / M | Known-working release rollback | Stage code and dependencies together, validate before switching, retain the previous release and test rollback. |
+| REL-08 | Optional / S/M | Complete configuration recovery | Include OpenALPR settings and deployed versions in small private backups; prove restore; optional copy to an existing controller/NAS. Vehicle history stays optional. |
 | REL-09 | Medium / S/M | Maintenance status | Show backup/renewal age, certificate expiry, clock sync and repeated restarts; optional one failure/recovery notification. |
 | CFG-02 | Medium / S/M | Safer allowlist editing | Unsaved indicators, useful row errors, undo and revision checks prevent silent overwrite from another screen. |
 | CFG-03 | Medium / M | Effective configuration view | Redacted active settings and shared validation make local/remote overrides clear; durable writes for infrequently changed configuration. |
@@ -50,10 +71,11 @@ analysis CPU. Smaller preview profiles (PERF-03) can be compared independently.
 
 | ID | Effort | Improvement | Success measure / constraint |
 |---|---|---|---|
-| PERF-01 | M/L | Real recognition ROI | Installed daemon currently ignores the exposed ROI option. Implement actual cropping and prove lower CPU without missed daytime/night-time arrivals using REC-01. |
+| PERF-01 | S/M experiment | Supported detector mask | The daemon ignores `roi=`, but installed OpenALPR supports `detection_mask_image` and reduces the detector search rectangle. Configure a private mask and compare CPU/earliest detection with day/night/edge-of-frame examples using REC-01. Savings unmeasured. |
 | PERF-02 | L | Activity-adaptive recognition | Keep a low baseline analysis rate and burst during activity; measure heat/CPU and arrival latency; test slow vehicles, rain and shadows. Depends on REC-01. |
 | PERF-03 | S/M | Small-screen preview profile | Compare smaller JPEGs and quality settings on physical screens; report displayed FPS and legibility, not just producer FPS. |
-| PERF-04 | L | Modern video transport | Compare a compressed video relay for capable clients while retaining JPEG support for old displays; justify additional complexity with measurements. |
+| PERF-04 | Deferred / L | Modern video transport | Compare a compressed video relay for capable clients while retaining JPEG support for old displays; justify additional complexity with measurements. |
+| PERF-05 | S experiment | Limit nested OCR threads | Compare `OMP_THREAD_LIMIT=1` on the same private OCR workload; record CPU, throughput, recognition output and burst latency. No guaranteed idle saving. |
 
 The currently measured preview source supplies about 10 distinct frames/second;
 raising the JPEG output setting alone cannot create additional source frames.
@@ -85,6 +107,29 @@ raising the JPEG output setting alone cannot create additional source frames.
 
 Each new completion should record its commit, automated checks, deployed checks,
 and remaining physical-device or real-vehicle verification here.
+
+## Design-review verification — 2026-09-29
+
+Branch: `design/device-layout-and-insights`. UX-10 and UX-11 are implemented
+for review, with an independent alternative mockup and a synthetic local
+comparison server. Production UI and recognition settings were not changed.
+
+- 337 Python tests and all six JavaScript suites passed; Ruff lint/format and
+  diff checks passed. New Stats API tests cover legacy categories, time bounds,
+  missing plates and read-only database access.
+- Home browser checks cover six viewport sizes, both themes and legacy sizing.
+  Stats checks cover four viewport sizes, both themes, empty/error recovery,
+  independent health failure, keyboard chart selection and a device clock/time
+  zone differing from the Pi. Pending reporting-period races and history
+  drill-through periods have JavaScript regression coverage.
+- The local comparison and alternative use synthetic data and an illustrated
+  camera view. Browser checks found no page errors or unexpected requests;
+  the comparison gate control is inert. The alternative's additional metrics
+  remain proposed features, not implemented production data.
+- A read-only Pi sample identified recognition as the dominant CPU user.
+  Detection masks, preview sizing and OCR thread limits are still experiments;
+  no savings or physical-device results are claimed for them.
+- Physical iPad/Pi layout and real arrival checks remain for any deployment.
 
 
 ## First-batch verification — 2026-09-29

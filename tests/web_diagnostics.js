@@ -41,7 +41,7 @@ function setup({ legacyIos = true } = {}) {
     "events-list", "events-more", "history-prev", "history-next",
     "timeline-list", "timeline-more", "timeline-page-info", "timeline-prev", "timeline-next",
     "stream-frame", "stream-status", "stream-fps", "stream-lag", "stream-health", "stream-banner", "stream-system",
-    "stats-chart", "insight-top-plate-card", "insight-top-unmatched-card",
+    "stats-chart", "insight-top-plate-card", "insight-top-unmatched-card", "history-window",
   ];
   const nodes = {};
   ids.forEach((id) => { nodes[id] = node(id); });
@@ -49,6 +49,11 @@ function setup({ legacyIos = true } = {}) {
   nodes["stream-frame"].appendChild(nodes["stream-lag"]);
   nodes["stats-chart"].getContext = () => ({});
   const timelineChips = ["30d", "7d"].map((value) => {
+    const chip = node(value);
+    chip.dataset.window = value;
+    return chip;
+  });
+  const statsChips = ["24h", "7d", "30d", "all"].map((value) => {
     const chip = node(value);
     chip.dataset.window = value;
     return chip;
@@ -63,6 +68,7 @@ function setup({ legacyIos = true } = {}) {
     querySelectorAll(selector) {
       if (selector === ".tab-panel") return panels;
       if (selector === "#tab-timeline .chip") return timelineChips;
+      if (selector === "#tab-stats .chip") return statsChips;
       return [];
     },
     createElement: node,
@@ -109,7 +115,7 @@ function setup({ legacyIos = true } = {}) {
       timer.callback();
     });
   }
-  return { app, requests, nodes, document, timelineChips, timers, fireTimers };
+  return { app, requests, nodes, document, timelineChips, statsChips, timers, fireTimers };
 }
 
 async function settle() {
@@ -168,6 +174,27 @@ async function checkStatsShortcuts() {
     await settle();
     assert(test.app.state.eventsPage === 0 && test.app.state.events[0].kind === kind, "Shortcut must replace the previous page");
   }
+  const resolvePeriod = (start) => {
+    test.requests[start].resolve({ services: {} });
+    test.requests[start + 1].resolve({ counts: { recognised: 1 }, timeseries: { bucket: "day", series: [] } });
+    test.requests[start + 2].resolve({ insights: {} });
+  };
+  resolvePeriod(0);
+  await settle();
+  await settle();
+  test.nodes["insight-top-plate-card"].dispatch("click");
+  assert(test.requests[test.requests.length - 1].url.includes("window=24h"), "Loaded Stats period must reach History");
+  assert(test.nodes["history-window"].value === "24h", "History selector must match the shortcut query");
+  const pendingPeriod = test.requests.length;
+  test.statsChips[3].dispatch("click");
+  test.nodes["insight-top-unmatched-card"].dispatch("click");
+  assert(test.requests[test.requests.length - 1].url.includes("window=24h"), "Pending Stats period must not replace the last loaded period");
+  resolvePeriod(pendingPeriod);
+  await settle();
+  await settle();
+  test.nodes["insight-top-unmatched-card"].dispatch("click");
+  assert(test.requests[test.requests.length - 1].url.includes("window=all"), "All-history Stats must open all-history captures");
+  assert(test.nodes["history-window"].value === "all", "All-history shortcut updates the visible filter");
 }
 
 async function checkDiagnosticPolling() {

@@ -9,6 +9,11 @@ history with images and timings.
 Planned work and acceptance criteria are tracked in [ROADMAP.md](ROADMAP.md).
 Development and public contribution checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+To compare the current interface with an alternative design using synthetic
+data, run `python3 tests/design_preview.py` and open `http://127.0.0.1:8765/`.
+This local preview cannot connect to a gate. See [design notes](docs/design/README.md)
+and the [performance review](docs/PERFORMANCE.md) for the current experiments.
+
 ![Gatepi ANPR UI](docs/UI.png)
 
 ## Who this is for
