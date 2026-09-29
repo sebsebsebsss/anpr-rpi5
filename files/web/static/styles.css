@@ -724,6 +724,13 @@ body.theme-dark .log-ts {
   line-height: 1.3;
 }
 
+.view-fps-value {
+  display: inline-block;
+  width: 4ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 body.theme-dark .home-health .status-ok {
   color: #75d49c;
 }

@@ -225,15 +225,25 @@ def main():
                 page.locator("#tablet-timeline-list .tablet-timeline-row").count() == 2, "recognised arrivals missing"
             )
 
-        def wall_geometry(fps_label=None):
-            return page.evaluate("""fpsLabel => {
+        def wall_geometry(fps_number=None):
+            return page.evaluate("""fpsNumber => {
               const badge = document.getElementById('tablet-stream-status');
-              const originalLabel = badge.textContent;
-              if (fpsLabel) badge.textContent = fpsLabel;
+              const number = badge.querySelector('.view-fps-value');
+              const originalNumber = number.textContent;
+              if (fpsNumber) number.textContent = fpsNumber;
+              const bounds = box => ({
+                x: box.x, y: box.y, width: box.width, height: box.height, bottom: box.bottom
+              });
               const rect = selector => {
                 const element = document.querySelector(selector);
-                const box = element.getBoundingClientRect();
-                return {x: box.x, y: box.y, width: box.width, height: box.height, bottom: box.bottom};
+                return bounds(element.getBoundingClientRect());
+              };
+              const textRect = text => {
+                const node = Array.from(number.parentNode.childNodes).find(child =>
+                  child.nodeType === Node.TEXT_NODE && child.textContent.includes(text));
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                return bounds(range.getBoundingClientRect());
               };
               const panels = Array.from(document.querySelectorAll(
                 '#tab-home, .tablet-grid, .tablet-grid > .card, .tablet-timeline-list'
@@ -249,6 +259,9 @@ def main():
                 scrollY,
                 button: rect('#open-gate-tablet'),
                 camera: rect('#tablet-stream-frame'),
+                fpsBadge: rect('#tablet-stream-status'),
+                viewText: textRect('View'),
+                fpsText: textRect('FPS'),
                 healthPillsInOneRow: pills.length === 3 && pills.every(box =>
                   Math.abs((box.top + box.bottom) / 2 - (pills[0].top + pills[0].bottom) / 2) <= 1),
                 panelsFit: panels.every(element => {
@@ -266,9 +279,9 @@ def main():
                     box.left >= card.left - 1 && box.right <= card.right + 1;
                 }),
               };
-              if (fpsLabel) badge.textContent = originalLabel;
+              if (fpsNumber) number.textContent = originalNumber;
               return geometry;
-            }""", fps_label)
+            }""", fps_number)
 
         def check_wall_layout():
             size = page.viewport_size
@@ -281,14 +294,20 @@ def main():
             require(geometry["panelsFit"], "wall panels must fit without scrolling or hiding overflow")
             require(geometry["contentsFit"], "wall content extends outside its card")
             require(geometry["healthPillsInOneRow"], "wall status pills must remain on one row")
-            # Actual scheduling can report 9.8 or 9.9 FPS. Exercise the wider
-            # two-digit rate without changing the stream or waiting for luck.
-            full_rate = wall_geometry("View 10.0 FPS")
-            require(full_rate["healthPillsInOneRow"], "10.0 FPS must not wrap the wall status pills")
-            require(full_rate["contentsFit"], "10.0 FPS must fit inside the live-view card")
+            # Cross the digit-count boundary without changing the stream or
+            # waiting for luck; only the number itself should move or change.
+            lower_rate = wall_geometry("9.8")
+            higher_rate = wall_geometry("10.1")
+            for rate in (lower_rate, higher_rate):
+                require(rate["healthPillsInOneRow"], "FPS changes must not wrap the wall status pills")
+                require(rate["contentsFit"], "the FPS pill must fit inside the live-view card")
+                require(
+                    rate["camera"] == geometry["camera"] and rate["button"] == geometry["button"],
+                    "the FPS digit count must not move the camera or shrink the gate target",
+                )
             require(
-                full_rate["camera"] == geometry["camera"] and full_rate["button"] == geometry["button"],
-                "the FPS digit count must not move the camera or shrink the gate target",
+                all(lower_rate[key] == higher_rate[key] for key in ("fpsBadge", "viewText", "fpsText")),
+                "changing 9.8 to 10.1 FPS must not move View, FPS, or the status pill",
             )
             decision = page.locator("#home-decision .decision-summary")
             if decision.count():

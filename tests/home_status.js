@@ -15,7 +15,9 @@ function setup({ abortAvailable = true } = {}) {
   function node(id) {
     const classes = new Set();
     return {
-      id, dataset: {}, children: [], listeners: {}, hidden: false, textContent: "", writes: 0,
+      id, dataset: {}, children: [], listeners: {}, hidden: false, text: "", writes: 0,
+      set textContent(value) { this.text = value; this.children = []; },
+      get textContent() { return this.text + this.children.map((child) => child.textContent).join(""); },
       classList: {
         contains: (name) => classes.has(name),
         add: (name) => classes.add(name),
@@ -27,6 +29,14 @@ function setup({ abortAvailable = true } = {}) {
       appendChild(child) { this.children.push(child); },
       setAttribute() {},
       querySelectorAll: () => [],
+      querySelector(selector) {
+        for (const child of this.children) {
+          if (selector === "." + child.className) return child;
+          const match = child.querySelector ? child.querySelector(selector) : null;
+          if (match) return match;
+        }
+        return null;
+      },
       addEventListener(name, callback) {
         if (!this.listeners[name]) this.listeners[name] = [];
         this.listeners[name].push(callback);
@@ -52,6 +62,7 @@ function setup({ abortAvailable = true } = {}) {
       return [];
     },
     createElement: node,
+    createTextNode: (textContent) => ({ textContent }),
     addEventListener: node("").addEventListener,
     dispatch: node("").dispatch,
   };

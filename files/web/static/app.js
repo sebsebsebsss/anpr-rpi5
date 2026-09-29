@@ -1802,7 +1802,22 @@ function renderHomeStatus() {
     label = "Source stale";
     kind = "bad";
   }
-  if (badge.textContent !== label) badge.textContent = label;
+  if (kind === "ok" && displayRate !== null) {
+    let value = badge.querySelector(".view-fps-value");
+    if (!value) {
+      const caption = document.createElement("span");
+      caption.textContent = "View ";
+      value = document.createElement("span");
+      value.className = "view-fps-value";
+      caption.appendChild(value);
+      caption.appendChild(document.createTextNode(" FPS"));
+      badge.textContent = "";
+      badge.appendChild(caption);
+    }
+    if (value.textContent !== displayRate) value.textContent = displayRate;
+  } else if (badge.textContent !== label) {
+    badge.textContent = label;
+  }
   badge.className = `live-badge status-${kind}`;
   badge.title = "FPS counts completed JPEG loads over up to five seconds, including repeated camera frames. Tap for details.";
   const serviceLabels = { alprd: "Recognition service", gate_anpr: "Gate worker", stream_jpeg: "Frame service", beanstalkd: "Queue" };
