@@ -29,6 +29,7 @@ const state = {
   timelineTotal: 0,
   timelineTotalPages: 1,
   timelineWindow: "30d",
+  timelineRequest: 0,
   tabletEvents: [],
   tabletLastFetch: 0,
   logsLastFetch: 0,
@@ -48,6 +49,7 @@ const state = {
   loadingTimelineEvents: false,
   gateOpenInFlight: false,
 };
+const streamDiagnosticPollers = [];
 
 const LEGACY_IOS =
   /iP(ad|hone|od)/.test(navigator.userAgent || "") &&
@@ -1009,6 +1011,7 @@ function setActiveTab(target, { updateHash = true } = {}) {
     panel.classList.toggle("active", isActive);
     panel.setAttribute("aria-hidden", String(!isActive));
   });
+  streamDiagnosticPollers.forEach((poll) => poll());
   if (target === "candidates" && !state.eventsLoaded && !state.loadingCandidateEvents) {
     fetchEvents({ reset: true });
   }
@@ -1251,6 +1254,13 @@ function setKindFilters(kinds) {
     chip.classList.toggle("active", state.eventsKinds.has(chip.dataset.kind));
   });
   renderEvents();
+}
+
+function showHistoryForKinds(kinds) {
+  setKindFilters(kinds);
+  const pending = fetchEvents({ reset: true });
+  setActiveTab("candidates");
+  return pending;
 }
 
 function initFilters() {
@@ -1648,6 +1658,7 @@ async function initStream() {
   const frame = document.getElementById("stream-frame");
   const status = document.getElementById("stream-status");
   const fpsEl = document.getElementById("stream-fps");
+  const lagEl = document.getElementById("stream-lag");
   if (!frame) return;
   state.streamLoaded = true;
   if (status) status.textContent = "Loading stream...";
@@ -1672,6 +1683,7 @@ async function initStream() {
       if (fpsEl) {
         frame.appendChild(fpsEl);
       }
+      if (lagEl) frame.appendChild(lagEl);
       frame.appendChild(el);
       if (status) status.textContent = "Live";
       startStreamFps(el);
@@ -1706,6 +1718,7 @@ async function initStream() {
     if (fpsEl) {
       frame.appendChild(fpsEl);
     }
+    if (lagEl) frame.appendChild(lagEl);
     frame.appendChild(el);
     if (status) status.textContent = "Live";
     setupStreamFullscreen(frame, status, url);
@@ -1810,6 +1823,27 @@ function startStreamFps(el) {
   fpsEl.textContent = "FPS: --";
 }
 
+function pollStreamDiagnostic(update, intervalMs) {
+  let pending = false;
+  let timer = null;
+  const visible = () => !document.hidden && isTabActive("stream");
+  const poll = async () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (!visible() || pending) return;
+    pending = true;
+    try {
+      await update();
+    } finally {
+      pending = false;
+      if (visible()) timer = setTimeout(poll, intervalMs);
+    }
+  };
+  streamDiagnosticPollers.push(poll);
+  document.addEventListener("visibilitychange", poll);
+  poll();
+}
+
 async function initStreamLag() {
   const lagEl = document.getElementById("stream-lag");
   if (!lagEl) return;
@@ -1817,7 +1851,7 @@ async function initStreamLag() {
     try {
       const resp = await fetch("/api/stream-lag");
       const data = await resp.json();
-      const lagMs = Number(data.lag_ms);
+      const lagMs = data.lag_ms;
       if (Number.isFinite(lagMs)) {
         lagEl.textContent = `Lag: ${(lagMs / 1000).toFixed(1)}s`;
       } else {
@@ -1827,8 +1861,7 @@ async function initStreamLag() {
       lagEl.textContent = "Lag: --";
     }
   };
-  update();
-  setInterval(update, 3000);
+  pollStreamDiagnostic(update, 3000);
 }
 
 async function initStreamHealth() {
@@ -1874,8 +1907,7 @@ async function initStreamHealth() {
       }
     }
   };
-  update();
-  setInterval(update, 3000);
+  pollStreamDiagnostic(update, 3000);
 }
 
 async function initSystemHealth() {
@@ -1911,8 +1943,7 @@ async function initSystemHealth() {
       systemEl.textContent = "System: --";
     }
   };
-  update();
-  setInterval(update, 5000);
+  pollStreamDiagnostic(update, 5000);
 }
 
 function describeTimelineEvent(event) {
@@ -1965,17 +1996,19 @@ function updateTimelinePagination(meta) {
 async function fetchTimeline({ page = 1 } = {}) {
   const list = document.getElementById("timeline-list");
   const more = document.getElementById("timeline-more");
-  if (!list || state.loadingTimelineEvents) return;
+  if (!list) return;
+  const requestId = ++state.timelineRequest;
   state.loadingTimelineEvents = true;
   try {
-    state.timelinePage = page;
     const resp = await fetch(
-      `/api/timeline?page=${state.timelinePage}&per_page=${state.timelinePerPage}&window=${state.timelineWindow}`
+      `/api/timeline?page=${page}&per_page=${state.timelinePerPage}&window=${state.timelineWindow}`
     );
     if (!resp.ok) {
       throw new Error(`timeline ${resp.status}`);
     }
     const data = await resp.json();
+    if (requestId !== state.timelineRequest) return;
+    state.timelinePage = page;
     state.timelineEvents = Array.isArray(data.items) ? data.items : [];
     state.timelineTotal = Number(data.total || 0);
     state.timelineTotalPages = Number(data.total_pages || 1);
@@ -1987,11 +2020,11 @@ async function fetchTimeline({ page = 1 } = {}) {
         : "No timeline events in this window";
     }
   } catch (err) {
-    if (more) {
+    if (requestId === state.timelineRequest && more) {
       more.textContent = "Failed to load timeline";
     }
   } finally {
-    state.loadingTimelineEvents = false;
+    if (requestId === state.timelineRequest) state.loadingTimelineEvents = false;
   }
 }
 
@@ -2376,15 +2409,13 @@ async function initStats() {
   const topPlateCard = document.getElementById("insight-top-plate-card");
   if (topPlateCard) {
     topPlateCard.addEventListener("click", () => {
-      setActiveTab("candidates");
-      setKindFilters(["recognised"]);
+      showHistoryForKinds(["recognised"]);
     });
   }
   const topUnmatchedCard = document.getElementById("insight-top-unmatched-card");
   if (topUnmatchedCard) {
     topUnmatchedCard.addEventListener("click", () => {
-      setActiveTab("candidates");
-      setKindFilters(["unmatched"]);
+      showHistoryForKinds(["unmatched"]);
     });
   }
   const busiestCard = document.getElementById("insight-busiest-card");

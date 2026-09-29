@@ -27,6 +27,7 @@ def test_https_off_retains_http_and_does_not_require_certificate():
     config = _render_nginx(False)
     assert "listen 80;" in config and "192.168.1.10" in config and "gate.local" in config
     assert "listen 443" not in config
+    assert "http2 on;" not in config
     assert "ssl_certificate" not in config
     assert "example.com" not in config
     assert "gate.example.com" in _render_nginx(False, "gate.example.com")
@@ -37,6 +38,8 @@ def test_https_on_rejects_unknown_hosts_and_preserves_http_proxy_origin():
     assert "listen 443 ssl default_server;" in config
     assert "ssl_reject_handshake on;\n    return 444;" in config
     assert "server_name gate.example.com;" in config
+    assert "listen 443 ssl;\n    http2 on;\n    server_name gate.example.com;" in config
+    assert config.count("http2 on;") == 1
     assert "listen 80;" in config and "192.168.1.10" in config
     assert "Strict-Transport-Security" not in config and "return 301" not in config and "return 308" not in config
     assert config.count("proxy_set_header Host $http_host;") == 4

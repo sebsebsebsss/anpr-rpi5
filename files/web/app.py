@@ -44,7 +44,7 @@ ALLOWLIST_PATH = os.getenv("PLATE_ALLOWLIST_PATH", "/opt/gate_anpr/allowlist.jso
 LOG_PATH = "/var/log/gate-anpr/gate_anpr_web.log"
 PLATES_DIR = "/home/pi/plates"
 STREAM_JPEG_PATH = os.getenv("GATE_WEB_STREAM_JPEG", "/run/gate-anpr/stream.jpg")
-STREAM_STALE_SECONDS = 15
+STREAM_STALE_SECONDS = env_int("GATE_WEB_STREAM_STALE_SECONDS", 15, "gate_anpr_web")
 PREVIEW_LOCK = threading.Lock()
 GATE_PIN_BOARD = env_int("GATE_PIN_BOARD", 23, "gate_anpr_web")
 GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
@@ -1484,25 +1484,28 @@ def ui_settings():
     return jsonify({"theme_mode": theme_mode, **sun_payload})
 
 
+def _stream_frame_status():
+    now = time.time()
+    try:
+        frame = os.stat(STREAM_JPEG_PATH)
+        if frame.st_size > 0:
+            return now, frame.st_mtime, max(0, now - frame.st_mtime)
+    except OSError:
+        pass
+    return now, None, None
+
+
 @app.route("/api/stream-lag", methods=["GET"])
 def stream_lag():
-    stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    now = datetime.now(timezone.utc).timestamp()
-    if not os.path.exists(stream_path):
-        return jsonify({"lag_ms": None, "frame_mtime": None})
-    mtime = os.path.getmtime(stream_path)
-    lag_ms = max(0, (now - mtime) * 1000)
-    return jsonify({"lag_ms": int(lag_ms), "frame_mtime": mtime, "server_time": now})
+    now, mtime, age = _stream_frame_status()
+    lag_ms = int(age * 1000) if age is not None else None
+    return jsonify({"lag_ms": lag_ms, "frame_mtime": mtime, "server_time": now})
 
 
 @app.route("/api/stream-health", methods=["GET"])
 def stream_health():
-    stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    now = datetime.now(timezone.utc).timestamp()
-    stale_seconds = int(os.getenv("GATE_WEB_STREAM_STALE_SECONDS", "10"))
-    stream_mtime = os.path.getmtime(stream_path) if os.path.exists(stream_path) else None
-    stream_age = now - stream_mtime if stream_mtime else None
-    stream_stale = stream_age is None or stream_age > stale_seconds
+    now, stream_mtime, stream_age = _stream_frame_status()
+    stream_stale = stream_age is None or stream_age > STREAM_STALE_SECONDS
 
     return jsonify(
         {
@@ -1510,7 +1513,7 @@ def stream_health():
             "stream_mtime": stream_mtime,
             "stream_age_s": stream_age,
             "stream_stale": stream_stale,
-            "stale_threshold_s": stale_seconds,
+            "stale_threshold_s": STREAM_STALE_SECONDS,
             "ok": not stream_stale,
         }
     )
@@ -1547,13 +1550,8 @@ def _latest_event_timestamp():
 def healthz():
     db_ok, db_error = sqlite_healthcheck(EVENTS_DB_PATH)
     allowlist_ok = os.path.exists(ALLOWLIST_PATH) and os.access(ALLOWLIST_PATH, os.R_OK)
-    try:
-        stream_stat = os.stat(STREAM_JPEG_PATH)
-        stream_age = max(0, time.time() - stream_stat.st_mtime)
-        stream_exists = stream_stat.st_size > 0
-    except OSError:
-        stream_age = None
-        stream_exists = False
+    _, _, stream_age = _stream_frame_status()
+    stream_exists = stream_age is not None
     stream_fresh = stream_exists and stream_age <= STREAM_STALE_SECONDS
     services = {
         "alprd": _systemctl_is_active("alprd"),

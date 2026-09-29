@@ -25,6 +25,9 @@ jobs:
       - name: Test gate controls and request failures
         run: node tests/gate_controls.js
 
+      - name: Test stream diagnostics and navigation requests
+        run: node tests/web_diagnostics.js
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

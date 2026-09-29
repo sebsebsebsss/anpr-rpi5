@@ -189,6 +189,20 @@ def main():
             require(summary["offscreen_stream_requests_2s"] == 0, "offscreen_stream_requests")
             require(page.evaluate("window.__gateSmoke.homeLoads") == paused_loads, "offscreen_stream_loads")
 
+            stage = "live_diagnostics"
+            # The homepage frame above proves initTabs has finished before
+            # clicking Live; an immediate click during startup has no handler.
+            page.locator('.tab[data-tab="stream"]').click()
+            page.wait_for_function("""() => {
+                const frame = document.querySelector('#stream-frame img');
+                const lag = document.getElementById('stream-lag');
+                return isTabActive('stream') && frame && frame.naturalWidth > 0 &&
+                    lag && /^Lag: [0-9]+\\.[0-9]s$/.test(lag.textContent) &&
+                    document.getElementById('stream-health').textContent === 'Health: OK';
+            }""")
+            require(requests_by_path.get("/api/stream-lag", 0) > 0, "live_lag_request_missing")
+            summary["live_diagnostics_checked"] = True
+
             stage = "health"
             health = page.evaluate("""async () => {
                 const response = await fetch('/api/healthz');

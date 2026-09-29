@@ -845,7 +845,7 @@
       RuntimeDirectoryMode=0755
       RuntimeDirectoryPreserve=yes
       Environment=GATE_WEB_STREAM_RTSP_URL={{ gate_web_stream_rtsp_url }}
-      ExecStart=/bin/sh -c 'exec ionice -c2 -n7 nice -n 10 /usr/bin/ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -analyzeduration 0 -probesize 32k -max_delay 0 -rtsp_transport tcp -i ${GATE_WEB_STREAM_RTSP_URL} -an -vf scale=${GATE_WEB_STREAM_WIDTH}:${GATE_WEB_STREAM_HEIGHT} -r ${GATE_WEB_STREAM_FPS} -q:v 7 -f image2pipe -vcodec mjpeg - | /usr/bin/python3 /usr/local/bin/gate_anpr_stream_writer.py {{ gate_web_stream_jpeg }}'
+      ExecStart=/bin/sh -c 'exec ionice -c2 -n7 nice -n 10 /usr/bin/ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -analyzeduration 0 -probesize 32k -max_delay 0 -rtsp_transport tcp -i ${GATE_WEB_STREAM_RTSP_URL} -an -vf fps=${GATE_WEB_STREAM_FPS},scale=${GATE_WEB_STREAM_WIDTH}:${GATE_WEB_STREAM_HEIGHT} -q:v 7 -f image2pipe -vcodec mjpeg - | /usr/bin/python3 /usr/local/bin/gate_anpr_stream_writer.py {{ gate_web_stream_jpeg }}'
       Restart=always
       RestartSec=5s
 
