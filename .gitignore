@@ -1,4 +1,5 @@
 files/gate_anpr.env
+files/gate_https_dns.env
 files/plate_allowlist.json
 ansible.env
 inventory.ini

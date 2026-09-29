@@ -43,10 +43,16 @@
     gate_replace_env: false
     gate_stream_overrides: {}
     gate_https_enabled: "{{ lookup('env', 'GATE_HTTPS_ENABLED') | default('false', true) | bool }}"
+    gate_https_acme_enabled: "{{ lookup('env', 'GATE_HTTPS_ACME_ENABLED') | default('false', true) | bool }}"
     gate_https_domain: "{{ lookup('env', 'GATE_HTTPS_DOMAIN') | default('', true) | trim | lower }}"
-    gate_https_cert_path: "{{ lookup('env', 'GATE_HTTPS_CERT_PATH') | default('/etc/gate-anpr/tls/fullchain.pem', true) }}"
-    gate_https_key_path: "{{ lookup('env', 'GATE_HTTPS_KEY_PATH') | default('/etc/gate-anpr/tls/privkey.pem', true) }}"
+    gate_https_challenge_alias: "{{ lookup('env', 'GATE_HTTPS_CHALLENGE_ALIAS') | default('', true) | trim | lower }}"
+    gate_https_cert_path: "{{ '/etc/gate-anpr/tls/current/fullchain.pem' if gate_https_acme_enabled | bool else (lookup('env', 'GATE_HTTPS_CERT_PATH') | default('/etc/gate-anpr/tls/fullchain.pem', true)) }}"
+    gate_https_key_path: "{{ '/etc/gate-anpr/tls/current/privkey.pem' if gate_https_acme_enabled | bool else (lookup('env', 'GATE_HTTPS_KEY_PATH') | default('/etc/gate-anpr/tls/privkey.pem', true)) }}"
     gate_https_min_valid_seconds: 86400
+    gate_https_dns_env_path: "{{ playbook_dir }}/files/gate_https_dns.env"
+    # acme.sh 3.1.6, verified signed tag and immutable archive checksum.
+    gate_https_acme_commit: 807da6498377ee5e0cf43a78091f46f12dc59a89
+    gate_https_acme_archive_sha256: ddbe1bcbd1a44a2623a2af167ebdc678669e6e2eb396742f2d1d28e02dc14220
 
     gatepi_alias_hostname: "{{ lookup('env', 'GATEPI_ALIAS_HOSTNAME') | default('gate', true) }}"
     run_openalpr_smoketest: false

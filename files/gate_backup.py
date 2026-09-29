@@ -124,6 +124,8 @@ def main():
             args.env_path,
             os.getenv("PLATE_ALLOWLIST_PATH") or persisted.get("PLATE_ALLOWLIST_PATH", "/opt/gate_anpr/allowlist.json"),
             "/opt/gate_anpr/ui_settings.json",
+            "/etc/gate-anpr/acme.json",
+            "/etc/gate-anpr/acme-dns.env",
         ]
     )
     snapshot = create_backup(db_path if args.include_database else None, args.destination, config_paths, args.keep)
