@@ -6,6 +6,10 @@ const isMain = document.body.classList.contains("main-page");
 const state = {
   plates: [],
   plateStatus: {},
+  platesSavedSnapshot: null,
+  platesSaving: false,
+  platesMessage: "",
+  platesMessageType: "",
   events: [],
   eventsPage: 0,
   eventsCursors: [null],
@@ -31,7 +35,14 @@ const state = {
   timelineWindow: "30d",
   timelineRequest: 0,
   tabletEvents: [],
-  tabletLastFetch: 0,
+  homeStatus: null,
+  homeStatusReceivedAt: null,
+  homeStatusError: false,
+  homeFrame: null,
+  homeStreamError: "",
+  homeSourceIsLocal: false,
+  unfamiliarRenderedId: null,
+  decisionRenderedKey: "",
   logsLastFetch: 0,
   logsLoading: false,
   logsLines: [],
@@ -49,7 +60,9 @@ const state = {
   loadingTimelineEvents: false,
   gateOpenInFlight: false,
 };
-const streamDiagnosticPollers = [];
+const visibleTabPollers = [];
+const HOME_STATUS_MAX_AGE_MS = 20000;
+const DISPLAY_STALE_MS = 10000;
 
 const LEGACY_IOS =
   /iP(ad|hone|od)/.test(navigator.userAgent || "") &&
@@ -122,6 +135,32 @@ function normalizeEventKind(event) {
     return "recognised";
   }
   return base;
+}
+
+function describeDecision(event) {
+  const decision = event && event.detail && event.detail.decision;
+  if (!decision || decision.version !== 1) return "";
+  const reasons = {
+    allowlist_match: "Allowlist match",
+    not_allowlisted: "Plate not on allowlist",
+    no_candidates: "No plate read",
+    recent_allowlisted: "Allowlisted vehicle already handled",
+    recent_vehicle: "Vehicle recently handled",
+    recent_unmatched: "Repeated unmatched read",
+    stale_capture: "Capture too old to act on",
+    relay_error: "Relay command failed",
+  };
+  const matches = { exact: "Exact allowlist match", normalised: "Matched with OCR character correction", fuzzy: "Similar plate matched" };
+  const commands = {
+    pulse_sent: "Relay pulse sent",
+    coalesced: "Used a recent relay pulse",
+    not_requested: "No relay pulse requested",
+    failed_before_activation: "No relay pulse sent",
+    uncertain: "Relay outcome uncertain",
+  };
+  const reason = decision.reason === "allowlist_match" && matches[decision.match_type]
+    ? matches[decision.match_type] : reasons[decision.reason];
+  return [reason, commands[decision.relay_command]].filter(Boolean).join(" • ");
 }
 
 function setStatus(msg) {
@@ -335,6 +374,8 @@ function createLegacyStreamImage(url) {
   const img = new Image();
   img.alt = "Live stream";
   img.className = "stream-image-single";
+  // Updated only by this displayed image's own load/error/watchdog events.
+  img.gateFrameState = { loadedAt: null, lastResult: "loading" };
   let timer = null;
   let requestTimeout = null;
   let requestStartedAt = 0;
@@ -359,13 +400,21 @@ function createLegacyStreamImage(url) {
     requestStartedAt = Date.now();
     // The interval includes download/decode time; adding it after each load
     // unnecessarily reduced 10 fps streams to 3–4 fps on slower screens.
-    img.onload = () => finish(Math.max(0, STREAM_REFRESH_MS - (Date.now() - requestStartedAt)));
-    img.onerror = () => finish(Math.max(1000, STREAM_REFRESH_MS));
+    img.onload = () => {
+      img.gateFrameState.loadedAt = Date.now();
+      img.gateFrameState.lastResult = "loaded";
+      finish(Math.max(0, STREAM_REFRESH_MS - (Date.now() - requestStartedAt)));
+    };
+    img.onerror = () => {
+      img.gateFrameState.lastResult = "error";
+      finish(Math.max(1000, STREAM_REFRESH_MS));
+    };
     // Recover even when WebKit never delivers a load/error event.
     requestTimeout = setTimeout(() => {
       img.onload = null;
       img.onerror = null;
       img.removeAttribute("src");
+      img.gateFrameState.lastResult = "timeout";
       finish(Math.max(1000, STREAM_REFRESH_MS));
     }, 10000);
     const sep = url.includes("?") ? "&" : "?";
@@ -382,18 +431,71 @@ function createSmoothImageStream(url) {
   return createLegacyStreamImage(url);
 }
 
+async function fetchAllowlistData(url, init = {}) {
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
+  let timer = null;
+  const request = async () => {
+    const response = await fetch(url, controller ? { ...init, signal: controller.signal } : init);
+    let data;
+    try {
+      data = await response.json();
+    } catch (err) {
+      if (response.ok) throw err;
+      data = {};
+    }
+    return { ok: response.ok, data };
+  };
+  try {
+    // The deadline covers headers AND the body. The losing request can never
+    // apply data later, including on iOS without AbortController support.
+    return await Promise.race([
+      request(),
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          if (controller) controller.abort();
+          reject(new Error("Allowlist request timed out"));
+        }, 10000);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 async function loadAllowlist() {
   const [platesRes, statusRes] = await Promise.all([
-    fetch("/api/plates"),
-    fetch("/api/allowlist-status"),
+    fetchAllowlistData("/api/plates"),
+    fetchAllowlistData("/api/allowlist-status"),
   ]);
-  state.plates = await platesRes.json();
-  const status = await statusRes.json();
+  if (!platesRes.ok || !statusRes.ok) throw new Error("Could not load plates");
+  const plates = platesRes.data;
+  const status = statusRes.data;
+  if (!Array.isArray(plates) || !Array.isArray(status)) throw new Error("Invalid plate response");
+  state.plates = plates;
   state.plateStatus = {};
   status.forEach((entry) => {
     if (!entry.owner) return;
     state.plateStatus[entry.owner] = entry.plates || [];
   });
+}
+
+function updateAllowlistFeedback() {
+  const dirty = state.platesSavedSnapshot !== JSON.stringify(state.plates);
+  const feedback = document.getElementById("allowlist-status");
+  if (feedback) {
+    feedback.textContent = state.platesSaving ? "Saving changes…"
+      : state.platesMessage || (dirty ? "Unsaved changes" : "All changes saved");
+    feedback.classList.toggle("is-error", state.platesMessageType === "error");
+  }
+  document.querySelectorAll("#plates-list input, #plates-list button, #add-plate, #save-plates").forEach((input) => {
+    input.disabled = state.platesSaving;
+  });
+}
+
+function markAllowlistChanged() {
+  state.platesMessage = "";
+  state.platesMessageType = "";
+  updateAllowlistFeedback();
 }
 
 function renderAllowlist() {
@@ -428,38 +530,61 @@ function renderAllowlist() {
     }
     ownerInput.addEventListener("input", (e) => {
       state.plates[idx].owner = e.target.value;
+      markAllowlistChanged();
     });
     platesInput.addEventListener("input", (e) => {
       const raw = e.target.value.split(",").map((p) => p.trim()).filter(Boolean);
       state.plates[idx].plates = raw.map((p) => p.toUpperCase());
+      markAllowlistChanged();
     });
     removeBtn.addEventListener("click", () => {
       state.plates.splice(idx, 1);
       renderAllowlist();
+      markAllowlistChanged();
     });
     platesList.appendChild(row);
   });
 }
 
 async function saveAllowlist() {
-  setStatus("Saving...");
+  if (state.platesSaving) return;
+  state.platesSaving = true;
+  state.platesMessage = "";
+  state.platesMessageType = "";
+  updateAllowlistFeedback();
   const cleaned = state.plates.map((entry) => ({
     owner: entry.owner,
     plates: (entry.plates || []).map((p) => p.toUpperCase()),
   }));
-  const resp = await fetch("/api/plates", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cleaned),
-  });
-  if (!resp.ok) {
-    const body = await resp.json();
-    setStatus(`Save failed: ${body.error || resp.status}`);
-    return;
+  let saved = false;
+  try {
+    const resp = await fetchAllowlistData("/api/plates", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cleaned),
+    });
+    if (!resp.ok) {
+      let message = "Could not save changes. Try again.";
+      if (resp.data && typeof resp.data.error === "string") message = resp.data.error;
+      state.platesMessage = message;
+      state.platesMessageType = "error";
+      return;
+    }
+    saved = true;
+    state.platesSavedSnapshot = JSON.stringify(state.plates);
+    await loadAllowlist();
+    state.platesSavedSnapshot = JSON.stringify(state.plates);
+    renderAllowlist();
+    state.platesMessage = "All changes saved";
+  } catch (err) {
+    state.platesMessage = saved
+      ? "Saved, but the updated list could not be loaded. Reload to check."
+      : "Could not confirm the save. Your edits are still here; check the connection and try again.";
+    state.platesMessageType = "error";
+  } finally {
+    state.platesSaving = false;
+    updateAllowlistFeedback();
   }
-  await loadAllowlist();
-  renderAllowlist();
-  setStatus("Saved");
 }
 
 async function fetchEvents({ reset = false, page = state.eventsPage, startId = null } = {}) {
@@ -778,6 +903,7 @@ function renderEvents() {
         <div class="plate">${escapeHtml(best.plate)}</div>
         <div class="meta">${escapeHtml(best.kind)} • ${bestMeta} ${best.owner ? `• ${escapeHtml(best.owner)}` : ""}</div>
         ${observedLine}
+        ${describeDecision(bestEvent) ? `<div class="decision-note">${escapeHtml(describeDecision(bestEvent))}</div>` : ""}
       `;
     }
     left.appendChild(header);
@@ -1011,7 +1137,12 @@ function setActiveTab(target, { updateHash = true } = {}) {
     panel.classList.toggle("active", isActive);
     panel.setAttribute("aria-hidden", String(!isActive));
   });
-  streamDiagnosticPollers.forEach((poll) => poll());
+  if (target === "home") {
+    renderHomeStatus();
+    renderHomeArrivals();
+    if (state.homeStatus) renderTabletTimeline();
+  }
+  visibleTabPollers.forEach((poll) => poll());
   if (target === "candidates" && !state.eventsLoaded && !state.loadingCandidateEvents) {
     fetchEvents({ reset: true });
   }
@@ -1509,12 +1640,10 @@ async function initMain() {
   }, 30000);
   setInterval(refreshGateLastOpen, 30000);
   setInterval(() => {
-    if (isTabActive("home")) {
-      const now = Date.now();
-      if (now - state.tabletLastFetch > 5000) {
-        state.tabletLastFetch = now;
-        fetchTabletTimeline();
-      }
+    if (!document.hidden && isTabActive("home")) {
+      renderHomeStatus();
+      renderHomeArrivals();
+      updateTabletTimelineRelativeTimes();
     }
     updateStatusTimestamp();
   }, 1000);
@@ -1528,72 +1657,203 @@ async function initTablet() {
     cooldownId: "tablet-cooldown",
   });
   initTabletStream();
-  fetchTabletTimeline({ reset: true });
+  pollVisibleTab(fetchHomeStatus, 5000, "home");
   initCooldownStatus();
 }
 
 async function initTabletStream() {
   const frame = document.getElementById("tablet-stream-frame");
-  const status = document.getElementById("tablet-stream-status");
   if (!frame) return;
-  if (status) status.textContent = "Loading stream...";
   try {
     const resp = await fetch("/api/stream");
+    if (!resp.ok) throw new Error("Stream configuration unavailable");
     const data = await resp.json();
     let url = (data.url || "").trim();
     if (!url) {
-      if (status) status.textContent = "No stream configured.";
+      state.homeStreamError = "No stream configured";
+      renderHomeStatus();
       return;
     }
     const lower = url.toLowerCase();
     if (lower.startsWith("rtsp://")) {
-      if (status) status.textContent = "RTSP not supported in browsers.";
+      state.homeStreamError = "Stream format unavailable";
+      renderHomeStatus();
       return;
     }
-    if (LEGACY_IOS) {
-      url = "/static/stream.jpg";
-      frame.innerHTML = "";
-      frame.appendChild(createLegacyStreamImage(url));
-      if (status) status.textContent = "Live";
-      return;
-    }
-    const stack = createSmoothImageStream(url);
+    if (LEGACY_IOS) url = "/static/stream.jpg";
+    const parsed = new URL(url, window.location.href);
+    state.homeSourceIsLocal = parsed.origin === window.location.origin && parsed.pathname === "/static/stream.jpg";
+    const stack = LEGACY_IOS ? createLegacyStreamImage(url) : createSmoothImageStream(url);
     frame.innerHTML = "";
     frame.appendChild(stack);
-    if (status) status.textContent = "Live";
+    state.homeFrame = stack.gateFrameState;
+    state.homeStreamError = "";
+    renderHomeStatus();
   } catch (err) {
-    if (status) status.textContent = "Stream failed.";
+    state.homeStreamError = "Stream unavailable";
+    renderHomeStatus();
   }
 }
 
-async function fetchTabletTimeline({ reset = false } = {}) {
-  const list = document.getElementById("tablet-timeline-list");
-  if (!list) return;
-  if (reset) state.tabletEvents = [];
-  try {
-    const resp = await fetch("/api/events?offset=0&limit=2&kind=recognised&window=30d");
-    const data = await resp.json();
-    const same =
-      Array.isArray(state.tabletEvents) &&
-      state.tabletEvents.length === data.length &&
-      state.tabletEvents.every((event, idx) => {
-        const next = data[idx] || {};
-        return (
-          event.id === next.id &&
-          event.captured_at === next.captured_at &&
-          event.image_url === next.image_url &&
-          event.plate === next.plate &&
-          event.owner === next.owner
-        );
-      });
-    if (!same) {
-      state.tabletEvents = data;
-      renderTabletTimeline();
-    } else {
-      updateTabletTimelineRelativeTimes();
+function homeServerNow() {
+  if (!state.homeStatus || state.homeStatusReceivedAt === null) return null;
+  return state.homeStatus.server_time + Math.max(0, Date.now() - state.homeStatusReceivedAt) / 1000;
+}
+
+function homeSeenAge(seenAt) {
+  const now = homeServerNow();
+  return now !== null && Number.isFinite(seenAt) ? Math.max(0, (now - seenAt) * 1000) : null;
+}
+
+function homeStatusIsCurrent() {
+  return state.homeStatus !== null && !state.homeStatusError && state.homeStatusReceivedAt !== null &&
+    Date.now() - state.homeStatusReceivedAt <= HOME_STATUS_MAX_AGE_MS;
+}
+
+function renderHomeStatus() {
+  const badge = document.getElementById("tablet-stream-status");
+  if (!badge) return;
+  const frame = state.homeFrame;
+  const frameAge = frame && frame.loadedAt !== null ? Math.max(0, Date.now() - frame.loadedAt) : null;
+  const snapshot = state.homeStatus;
+  const current = homeStatusIsCurrent();
+  const now = homeServerNow();
+  const stream = snapshot && snapshot.stream || {};
+  const sourceAge = Number.isFinite(stream.age_seconds) && now !== null
+    ? stream.age_seconds + Math.max(0, now - snapshot.server_time) : null;
+  const threshold = Number.isFinite(stream.stale_after_seconds) ? stream.stale_after_seconds : 15;
+  let label = "View updating";
+  let kind = "ok";
+  if (state.homeStreamError) {
+    label = state.homeStreamError;
+    kind = "bad";
+  } else if (frame && frame.lastResult === "error") {
+    label = "View interrupted";
+    kind = "bad";
+  } else if (frame && (frame.lastResult === "timeout" || frameAge !== null && frameAge > DISPLAY_STALE_MS)) {
+    label = "Frame stalled";
+    kind = "bad";
+  } else if (frameAge === null) {
+    label = "Loading view…";
+    kind = "unknown";
+  } else if (!current) {
+    label = "Status unavailable";
+    kind = "unknown";
+  } else if (state.homeSourceIsLocal && (!stream.fresh || sourceAge === null || sourceAge > threshold)) {
+    label = "Source stale";
+    kind = "bad";
+  }
+  if (badge.textContent !== label) badge.textContent = label;
+  badge.className = `live-badge status-${kind}`;
+  const system = document.getElementById("tablet-system-status");
+  if (system) {
+    const parts = [frameAge === null ? "No image loaded" : `Image loaded ${Math.floor(frameAge / 1000)}s ago`];
+    if (state.homeSourceIsLocal) {
+      parts.push(current && sourceAge !== null ? `Pi frame ${Math.floor(sourceAge)}s old` : "Pi frame status unavailable");
     }
+    if (!current || !Number.isFinite(snapshot.services_checked_at) || now - snapshot.services_checked_at > 20) {
+      parts.push("Service status unavailable");
+    } else {
+      const services = snapshot.services || {};
+      const labels = { alprd: "Recognition service", gate_anpr: "Gate worker", stream_jpeg: "Frame service", beanstalkd: "Queue" };
+      const issues = Object.keys(labels).filter((key) => services[key] !== "active").map((key) => {
+        return `${labels[key]} ${services[key] === "inactive" || services[key] === "failed" ? "inactive" : "unknown"}`;
+      });
+      parts.push(issues.length ? issues.join("; ") : "Services active");
+    }
+    const detail = parts.join(" • ");
+    if (system.textContent !== detail) system.textContent = detail;
+  }
+}
+
+async function fetchHomeStatus() {
+  let timeout = null;
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
+  try {
+    if (controller) timeout = setTimeout(() => controller.abort(), 10000);
+    const resp = await fetch("/api/home-status", controller ? { signal: controller.signal } : {});
+    if (!resp.ok) throw new Error("Home status unavailable");
+    const data = await resp.json();
+    if (!data || !Number.isFinite(data.server_time)) throw new Error("Invalid home status");
+    const firstSnapshot = state.homeStatus === null;
+    state.homeStatus = data;
+    state.homeStatusReceivedAt = Date.now();
+    state.homeStatusError = false;
+    const recognised = Array.isArray(data.recognised) ? data.recognised.slice(0, 2) : [];
+    if (firstSnapshot || JSON.stringify(state.tabletEvents) !== JSON.stringify(recognised)) {
+      state.tabletEvents = recognised;
+      if (!document.hidden && isTabActive("home")) renderTabletTimeline();
+    }
+    updateTabletTimelineRelativeTimes();
   } catch (err) {
-    // silent
+    state.homeStatusError = true;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    renderHomeStatus();
+    renderHomeArrivals();
+  }
+}
+
+function renderHomeArrivals() {
+  if (document.hidden || !isTabActive("home")) return;
+  const snapshot = state.homeStatus;
+  const now = homeServerNow();
+  const unknown = document.getElementById("home-unfamiliar");
+  if (unknown) {
+    const entries = snapshot && Array.isArray(snapshot.unfamiliar) ? snapshot.unfamiliar : [];
+    const event = entries.find((entry) => Number.isFinite(entry.seen_at) && Number.isFinite(entry.expires_at) &&
+      now !== null && now < Math.min(entry.expires_at, entry.seen_at + 300));
+    unknown.hidden = !event;
+    if (!event) {
+      unknown.innerHTML = "";
+      state.unfamiliarRenderedId = null;
+    } else {
+      const key = JSON.stringify([event.id, event.seen_at, event.plate, event.thumbnail_url, event.preview_url]);
+      if (state.unfamiliarRenderedId !== key) {
+        const preview = historyPreview(event, true);
+        const plate = event.plate && event.plate !== "UNKNOWN" ? event.plate : "Plate unreadable";
+        unknown.innerHTML = `
+          ${preview ? `<img src="${escapeHtml(preview)}" alt="Recent unfamiliar vehicle capture" />` : ""}
+          <div><div class="unfamiliar-title">Unfamiliar vehicle seen</div>
+            <div class="plate">${escapeHtml(plate)}</div><div id="home-unfamiliar-age" class="meta"></div>
+          </div>`;
+        state.unfamiliarRenderedId = key;
+      }
+      const age = document.getElementById("home-unfamiliar-age");
+      if (age) age.textContent = `Seen ${formatRelativeDelta(homeSeenAge(event.seen_at))}`;
+    }
+  }
+  const card = document.getElementById("home-decision");
+  if (card) {
+    const decisions = snapshot && Array.isArray(snapshot.recent_decisions) ? snapshot.recent_decisions : [];
+    const event = decisions.find((item) => describeDecision(item));
+    card.hidden = !event;
+    if (snapshot && snapshot.decisions_available === false) {
+      card.hidden = false;
+      card.textContent = "Decision history unavailable";
+      state.decisionRenderedKey = "";
+    } else if (!event) {
+      card.innerHTML = "";
+      state.decisionRenderedKey = "";
+    } else {
+      const key = JSON.stringify([event.id, event.plate, event.detail]);
+      if (key !== state.decisionRenderedKey) {
+        card.innerHTML = `<div class="decision-title">Latest ANPR decision</div>
+          <div class="plate">${escapeHtml(event.plate || event.observed_plate || "Plate unreadable")}</div>
+          <div class="decision-note">${escapeHtml(describeDecision(event))}</div>
+          <div id="home-decision-age" class="meta"></div>`;
+        state.decisionRenderedKey = key;
+      }
+      const age = document.getElementById("home-decision-age");
+      const elapsed = homeSeenAge(event.seen_at);
+      if (age) age.textContent = elapsed === null ? "" : `Decision ${formatRelativeDelta(elapsed)}`;
+    }
+  }
+  const status = document.getElementById("home-arrival-status");
+  if (status) {
+    status.hidden = homeStatusIsCurrent();
+    status.textContent = snapshot ? "Arrival updates unavailable; showing last received details." :
+      state.homeStatusError ? "Arrival updates unavailable." : "Loading recent arrivals…";
   }
 }
 
@@ -1607,19 +1867,21 @@ function renderTabletTimeline() {
     const thumb = event.image_url
       ? `<img src="${escapeHtml(historyPreview(event, true))}" alt="capture" loading="lazy" decoding="async" fetchpriority="low" />`
       : `<div class="tablet-thumb-placeholder"></div>`;
-    const ageMinutes = getAgeMinutes(event.captured_at);
+    const seenAge = homeSeenAge(event.seen_at);
+    const ageMinutes = seenAge === null ? getAgeMinutes(event.captured_at) : Math.floor(seenAge / 60000);
     const dotClass = ageMinutes !== null && ageMinutes < 60 ? "dot-fresh" : "dot-stale";
-    const rel = formatRelative(event.captured_at);
+    const rel = seenAge === null ? formatRelative(event.captured_at) : formatRelativeDelta(seenAge);
     const timestamp = escapeHtml(event.captured_at || "");
+    const seenAttr = Number.isFinite(event.seen_at) ? `data-tablet-seen-at="${event.seen_at}"` : "";
     row.innerHTML = `
       <div class="tablet-thumb">${thumb}</div>
       <div class="tablet-info">
         <div class="plate">${escapeHtml(event.plate || "UNKNOWN")}${event.owner ? ` - ${escapeHtml(event.owner)}` : ""}</div>
-        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))} - <span data-tablet-relative="${timestamp}">${escapeHtml(rel)}</span></div>
+        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))} - <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span></div>
       </div>
       <div class="tablet-time">
-        <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}"></span>
-        <span data-tablet-relative="${timestamp}">${escapeHtml(rel)}</span>
+        <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}" ${seenAttr}></span>
+        <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span>
       </div>
     `;
     if (!document.body.classList.contains("fullscreen-page")) {
@@ -1644,10 +1906,12 @@ function updateTabletTimelineRelativeTimes() {
   const list = document.getElementById("tablet-timeline-list");
   if (!list) return;
   list.querySelectorAll("[data-tablet-relative]").forEach((node) => {
-    node.textContent = formatRelative(node.dataset.tabletRelative);
+    const elapsed = homeSeenAge(Number(node.dataset.tabletSeenAt));
+    node.textContent = elapsed === null ? formatRelative(node.dataset.tabletRelative) : formatRelativeDelta(elapsed);
   });
   list.querySelectorAll("[data-tablet-relative-dot]").forEach((dot) => {
-    const ageMinutes = getAgeMinutes(dot.dataset.tabletRelativeDot);
+    const elapsed = homeSeenAge(Number(dot.dataset.tabletSeenAt));
+    const ageMinutes = elapsed === null ? getAgeMinutes(dot.dataset.tabletRelativeDot) : Math.floor(elapsed / 60000);
     const isFresh = ageMinutes !== null && ageMinutes < 60;
     dot.classList.toggle("dot-fresh", isFresh);
     dot.classList.toggle("dot-stale", !isFresh);
@@ -1823,10 +2087,10 @@ function startStreamFps(el) {
   fpsEl.textContent = "FPS: --";
 }
 
-function pollStreamDiagnostic(update, intervalMs) {
+function pollVisibleTab(update, intervalMs, tab = "stream") {
   let pending = false;
   let timer = null;
-  const visible = () => !document.hidden && isTabActive("stream");
+  const visible = () => !document.hidden && isTabActive(tab);
   const poll = async () => {
     if (timer !== null) clearTimeout(timer);
     timer = null;
@@ -1839,7 +2103,7 @@ function pollStreamDiagnostic(update, intervalMs) {
       if (visible()) timer = setTimeout(poll, intervalMs);
     }
   };
-  streamDiagnosticPollers.push(poll);
+  visibleTabPollers.push(poll);
   document.addEventListener("visibilitychange", poll);
   poll();
 }
@@ -1861,7 +2125,7 @@ async function initStreamLag() {
       lagEl.textContent = "Lag: --";
     }
   };
-  pollStreamDiagnostic(update, 3000);
+  pollVisibleTab(update, 3000);
 }
 
 async function initStreamHealth() {
@@ -1907,7 +2171,7 @@ async function initStreamHealth() {
       }
     }
   };
-  pollStreamDiagnostic(update, 3000);
+  pollVisibleTab(update, 3000);
 }
 
 async function initSystemHealth() {
@@ -1943,7 +2207,7 @@ async function initSystemHealth() {
       systemEl.textContent = "System: --";
     }
   };
-  pollStreamDiagnostic(update, 5000);
+  pollVisibleTab(update, 5000);
 }
 
 function describeTimelineEvent(event) {
@@ -2091,7 +2355,16 @@ async function initAdmin() {
   const savePlatesBtn = document.getElementById("save-plates");
   const platesList = document.getElementById("plates-list");
   setStatus("Loading...");
-  await loadAllowlist();
+  try {
+    await loadAllowlist();
+  } catch (err) {
+    setStatus("Could not load plates");
+    const feedback = document.getElementById("allowlist-status");
+    if (feedback) feedback.textContent = "Could not load the allowlist. Reload this page to try again.";
+    if (savePlatesBtn) savePlatesBtn.disabled = true;
+    if (addPlateBtn) addPlateBtn.disabled = true;
+    return;
+  }
   if (Array.isArray(state.plates) && state.plates.length && Array.isArray(state.plates[0])) {
     const grouped = {};
     state.plates.forEach(([plate, owner]) => {
@@ -2101,10 +2374,13 @@ async function initAdmin() {
     state.plates = Object.values(grouped);
   }
   renderAllowlist();
+  state.platesSavedSnapshot = JSON.stringify(state.plates);
+  updateAllowlistFeedback();
   setStatus("Ready");
   addPlateBtn.addEventListener("click", () => {
     state.plates.push({ owner: "", plates: [] });
     renderAllowlist();
+    markAllowlistChanged();
     if (!platesList) return;
     const rows = platesList.querySelectorAll(".plate-row");
     const last = rows[rows.length - 1];

@@ -8,13 +8,24 @@ import signal
 import sys
 import time
 import traceback
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from time import gmtime, strftime
 
 import greenstalk
 import requests
 from allowlist_util import normalise_plate
-from gate_runtime import GateActuationError, configure_logging, env_int, init_events_db, insert_event, open_gate
+from gate_runtime import (
+    RECENT_DECISION_GLOBAL_SAMPLE_SECONDS,
+    RECENT_DECISION_SAMPLE_SECONDS,
+    GateActuationError,
+    configure_logging,
+    env_int,
+    init_events_db,
+    insert_event,
+    insert_recent_decision,
+    open_gate,
+)
 
 _SAFE_UUID = re.compile(r"^[A-Za-z0-9\-]+$")
 
@@ -47,6 +58,9 @@ last_seen_reg = ""
 last_seen_time = 0
 last_seen_allowed = {}
 last_seen_unmatched = {}
+_recent_decision_samples = OrderedDict()
+_last_recent_decision_sample = None
+_last_decision_write_warning = None
 
 MATCH_DEDUP_SECONDS = env_int("MATCH_DEDUP_SECONDS", 60, "gate_anpr")
 UNMATCHED_DEDUP_SECONDS = env_int("UNMATCHED_DEDUP_SECONDS", 30, "gate_anpr")
@@ -255,6 +269,7 @@ def _record_event(
     observed_confidence=None,
     fuzzy_distance=None,
     fuzzy=None,
+    detail=None,
 ):
     insert_event(
         EVENTS_DB_PATH,
@@ -272,7 +287,56 @@ def _record_event(
         observed_confidence=observed_confidence,
         fuzzy_distance=fuzzy_distance,
         fuzzy=fuzzy,
+        detail=detail,
     )
+
+
+def _match_type(observed_plate, registered_plate, fuzzy_match):
+    if fuzzy_match:
+        return "fuzzy"
+    # Presentation differences are separate from the existing OCR-confusable
+    # folding. This explains the selected match without changing its policy.
+    observed = "".join(str(observed_plate).upper().split())
+    registered = "".join(str(registered_plate).upper().split())
+    return "exact" if observed == registered else "normalised"
+
+
+def _record_recent_decision(**record):
+    """Best-effort sampled diagnostics; failures never change job processing."""
+    global _last_recent_decision_sample, _last_decision_write_warning
+    now = time.monotonic()
+    try:
+        decision = record["detail"]["decision"]
+        command = decision["relay_command"]
+        key = (
+            decision["reason"],
+            normalise_plate(record.get("plate") or record.get("observed_plate") or ""),
+            command,
+        )
+        previous = _recent_decision_samples.get(key)
+        if previous is not None and 0 <= now - previous < RECENT_DECISION_SAMPLE_SECONDS:
+            return False
+        # Actual commands and relay errors must remain visible even when noisy
+        # suppressed reads have just used the ordinary diagnostic write budget.
+        priority = command != "not_requested"
+        if (
+            not priority
+            and _last_recent_decision_sample is not None
+            and 0 <= now - _last_recent_decision_sample < RECENT_DECISION_GLOBAL_SAMPLE_SECONDS
+        ):
+            return False
+        _recent_decision_samples[key] = now
+        _recent_decision_samples.move_to_end(key)
+        while len(_recent_decision_samples) > 256:
+            _recent_decision_samples.popitem(last=False)
+        _last_recent_decision_sample = now
+        insert_recent_decision(EVENTS_DB_PATH, **record)
+        return True
+    except Exception:
+        if _last_decision_write_warning is None or now - _last_decision_write_warning >= 60:
+            log.warning("Recent decision sample could not be stored", exc_info=True)
+            _last_decision_write_warning = now
+        return False
 
 
 def _pushover_message(owner, display_plate):
@@ -412,6 +476,41 @@ def consumer_main(client):
             allowlist_display_map = _allowlist_display_map(list_of_plates)
             candidate_keys = _candidate_plate_keys(candidates)
 
+            def explain_decision(
+                reason,
+                *,
+                plate="",
+                observed_plate="",
+                owner="",
+                confidence=None,
+                match_type="none",
+                relay_command="not_requested",
+                candidate_rank=None,
+                **extra,
+            ):
+                detail = {
+                    "decision": {
+                        "version": 1,
+                        "reason": reason,
+                        "match_type": match_type,
+                        "relay_command": relay_command,
+                        "candidate_rank": candidate_rank,
+                        "candidate_count": len(candidates),
+                        "capture_age_ms": round((time.time() - capture_epoch) * 1000),
+                        **extra,
+                    }
+                }
+                _record_recent_decision(
+                    plate=plate,
+                    observed_plate=observed_plate,
+                    owner=owner,
+                    confidence=confidence,
+                    image_name=image_name,
+                    captured_at=captured_at,
+                    detail=detail,
+                )
+                return detail
+
             log.info("Current Time: %s", strftime("%Y-%m-%d %H:%M:%S", gmtime()))
             log.info(
                 "Time Plates Captured: %s",
@@ -424,7 +523,7 @@ def consumer_main(client):
             if min_time > time.time():
                 matched = False
                 suppressed_duplicate = False
-                for cand in candidates:
+                for candidate_rank, cand in enumerate(candidates, 1):
                     number_plate = cand["plate"]
                     norm_plate = normalise_plate(number_plate)
                     log.info("Candidate plate: %s", number_plate)
@@ -457,7 +556,7 @@ def consumer_main(client):
                             log.info("Plate %s recognised. Opening gate", display_plate)
 
                         try:
-                            open_gate(gatePin, gatePin_bcm, log)
+                            pulse_result = open_gate(gatePin, gatePin_bcm, log)
                         except GateActuationError as exc:
                             if exc.may_have_activated:
                                 # A failed write/cleanup may follow a real pulse.
@@ -466,11 +565,33 @@ def consumer_main(client):
                                 _mark_recent_plate_keys(
                                     last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now
                                 )
+                            explain_decision(
+                                "relay_error",
+                                plate=match_plate,
+                                observed_plate=number_plate,
+                                owner=owner,
+                                confidence=cand.get("confidence"),
+                                match_type=_match_type(number_plate, display_plate, fuzzy_match),
+                                relay_command="uncertain" if exc.may_have_activated else "failed_before_activation",
+                                candidate_rank=candidate_rank,
+                            )
                             raise
                         last_seen_time = now
                         last_seen_reg = match_plate
                         _mark_recent_plate_keys(last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now)
                         matched = True
+
+                        decision_detail = explain_decision(
+                            "allowlist_match",
+                            plate=match_plate,
+                            observed_plate=number_plate,
+                            owner=owner,
+                            confidence=cand.get("confidence"),
+                            match_type=_match_type(number_plate, display_plate, fuzzy_match),
+                            relay_command="coalesced" if pulse_result is False else "pulse_sent",
+                            candidate_rank=candidate_rank,
+                            fuzzy_distance=fuzzy_match[2] if fuzzy_match else 0,
+                        )
 
                         jpg_path = "/home/pi/plates/%s.jpg" % uuid if uuid else ""
                         log.debug("Sending pushover with image %s", jpg_path)
@@ -488,6 +609,7 @@ def consumer_main(client):
                             observed_confidence=cand.get("confidence"),
                             fuzzy_distance=fuzzy_match[2] if fuzzy_match else 0,
                             fuzzy=1 if fuzzy_match else 0,
+                            detail=decision_detail,
                         )
                         log.info(
                             "Recorded event kind=recognised plate=%s confidence=%s allowed=true",
@@ -513,6 +635,18 @@ def consumer_main(client):
                                 last_seen_allowed,
                                 [match_plate, norm_plate] + candidate_keys,
                                 now,
+                            )
+                            explain_decision(
+                                "recent_allowlisted",
+                                plate=match_plate,
+                                observed_plate=number_plate,
+                                owner=allowlist_map.get(match_plate, ""),
+                                confidence=cand.get("confidence"),
+                                match_type=_match_type(
+                                    number_plate, allowlist_display_map.get(match_plate, match_plate), fuzzy_match
+                                ),
+                                candidate_rank=candidate_rank,
+                                suppression_window_seconds=MATCH_DEDUP_SECONDS,
                             )
                             log.info(
                                 "Suppressing duplicate recognised vehicle for %s (matched %s)",
@@ -540,6 +674,14 @@ def consumer_main(client):
                     )
                     if recent_allowed:
                         _mark_recent_plate_keys(last_seen_allowed, [top_key] + candidate_keys, now)
+                        explain_decision(
+                            "recent_vehicle",
+                            plate=top_plate,
+                            observed_plate=top_plate,
+                            confidence=candidates[0].get("confidence") if candidates else None,
+                            matched_recent_plate=recent_allowed,
+                            suppression_window_seconds=MATCH_DEDUP_SECONDS,
+                        )
                         log.info(
                             "Suppressing duplicate vehicle read %s near recent recognised key %s",
                             top_plate,
@@ -547,6 +689,14 @@ def consumer_main(client):
                         )
                     elif recent_unmatched:
                         _mark_recent_plate_keys(last_seen_unmatched, [top_key] + candidate_keys, now)
+                        explain_decision(
+                            "recent_unmatched",
+                            plate=top_plate,
+                            observed_plate=top_plate,
+                            confidence=candidates[0].get("confidence") if candidates else None,
+                            matched_recent_plate=recent_unmatched,
+                            suppression_window_seconds=UNMATCHED_DEDUP_SECONDS,
+                        )
                         log.info(
                             "Suppressing duplicate unmatched vehicle read %s near recent key %s",
                             top_plate,
@@ -558,6 +708,16 @@ def consumer_main(client):
                         is_known = bool(owner)
                         event_kind = "recognised" if is_known else "unmatched"
                         event_plate = top_key if is_known else top_plate
+                        decision_detail = explain_decision(
+                            "not_allowlisted" if candidates else "no_candidates",
+                            plate=event_plate,
+                            observed_plate=top_plate,
+                            owner=owner,
+                            confidence=candidates[0].get("confidence") if candidates else None,
+                            candidate_rank=1 if candidates else None,
+                            fuzzy_enabled=FUZZY_ALLOWLIST,
+                            fuzzy_min_confidence=FUZZY_MIN_CONFIDENCE,
+                        )
                         _record_event(
                             uuid=uuid,
                             plate=event_plate,
@@ -572,6 +732,7 @@ def consumer_main(client):
                             observed_confidence=candidates[0].get("confidence") if candidates else None,
                             fuzzy_distance=None,
                             fuzzy=0,
+                            detail=decision_detail,
                         )
                         log.info(
                             "Recorded event kind=%s plate=%s confidence=%s allowed=%s",
@@ -581,6 +742,15 @@ def consumer_main(client):
                             is_known,
                         )
             else:
+                top_candidate = candidates[0] if candidates else {}
+                explain_decision(
+                    "stale_capture",
+                    plate=top_candidate.get("plate", ""),
+                    observed_plate=top_candidate.get("plate", ""),
+                    confidence=top_candidate.get("confidence"),
+                    match_type="not_evaluated",
+                    maximum_capture_age_seconds=10,
+                )
                 log.debug("Plate result too old; skipping (min_time=%s)", min_time)
 
             # Success: delete job so it doesn't come back

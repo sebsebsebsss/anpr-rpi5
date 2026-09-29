@@ -114,6 +114,23 @@ def main():
             if args.ipad:
                 require(page.evaluate("typeof LEGACY_IOS !== 'undefined' && LEGACY_IOS"), "legacy_user_agent_detection")
             stream_path = page.locator("#tablet-stream-frame img").evaluate("image => new URL(image.src).pathname")
+            stage = "home_status"
+            page.wait_for_function("""() => state.homeStatus && state.homeFrame &&
+                state.homeFrame.loadedAt !== null &&
+                document.getElementById('tablet-stream-status').textContent === 'View updating'
+            """)
+            home = page.evaluate("""() => ({
+                known: document.querySelectorAll('#tablet-timeline-list .tablet-timeline-row').length,
+                unfamiliar: document.getElementById('home-unfamiliar').hidden ? 0 : 1,
+                previewOnly: Array.from(document.querySelectorAll('#home-unfamiliar img')).every(image =>
+                    (image.getAttribute('src') || '').startsWith('/previews/'))
+            })""")
+            require(home["known"] <= 2 and home["unfamiliar"] <= 1, "home_arrivals_bounded")
+            require(home["previewOnly"], "home_arrival_preview_urls")
+            summary.update(
+                home_status_checked=True, home_known_count=home["known"], home_unfamiliar_count=home["unfamiliar"]
+            )
+            stage = "homepage_stream"
             before = page.evaluate("window.__gateSmoke.homeLoads")
             sample_start = time.monotonic()
             page.wait_for_timeout(8000)
@@ -183,11 +200,15 @@ def main():
             # to finish before checking for any further hidden-stream traffic.
             page.wait_for_timeout(1500)
             paused_requests = requests_by_path.get(stream_path, 0)
+            paused_home_requests = requests_by_path.get("/api/home-status", 0)
             paused_loads = page.evaluate("window.__gateSmoke.homeLoads")
             page.wait_for_timeout(2000)
             summary["offscreen_stream_requests_2s"] = requests_by_path.get(stream_path, 0) - paused_requests
             require(summary["offscreen_stream_requests_2s"] == 0, "offscreen_stream_requests")
             require(page.evaluate("window.__gateSmoke.homeLoads") == paused_loads, "offscreen_stream_loads")
+            require(
+                requests_by_path.get("/api/home-status", 0) == paused_home_requests, "offscreen_home_status_requests"
+            )
 
             stage = "live_diagnostics"
             # The homepage frame above proves initTabs has finished before

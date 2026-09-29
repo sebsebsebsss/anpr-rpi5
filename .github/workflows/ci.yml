@@ -28,6 +28,9 @@ jobs:
       - name: Test stream diagnostics and navigation requests
         run: node tests/web_diagnostics.js
 
+      - name: Test home status, arrivals and allowlist feedback
+        run: node tests/home_status.js
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

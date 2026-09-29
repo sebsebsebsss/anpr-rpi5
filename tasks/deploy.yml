@@ -173,7 +173,9 @@
     owner: pi
     group: pi
     mode: "0755"
-  notify: restart gate_anpr
+  notify:
+    - restart gate_anpr
+    - restart gate_anpr_web
   tags:
     - deploy
 
@@ -505,6 +507,9 @@
   pip:
     virtualenv: "{{ venv_path }}"
     requirements: "{{ app_dir }}/requirements.txt"
+  notify:
+    - restart gate_anpr
+    - restart gate_anpr_web
   tags:
     - deploy
 

@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from html import escape
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from flask import Flask, abort, jsonify, request, send_from_directory
@@ -27,8 +28,11 @@ ROOT_DIR = os.path.dirname(APP_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from allowlist_util import normalise_plate  # noqa: E402
+from allowlist_util import group_allowlist, normalise_plate, validate_allowlist  # noqa: E402
 from gate_runtime import (  # noqa: E402
+    RECENT_DECISION_GLOBAL_SAMPLE_SECONDS,
+    RECENT_DECISION_SAMPLE_SECONDS,
+    RECENT_DECISIONS_LIMIT,
     GateActuationError,
     configure_logging,
     env_int,
@@ -36,6 +40,7 @@ from gate_runtime import (  # noqa: E402
     insert_event,
     now_local_str,
     parse_local_timestamp,
+    read_recent_decisions,
     sqlite_healthcheck,
 )
 from gate_runtime import open_gate as trigger_gate  # noqa: E402
@@ -46,6 +51,9 @@ PLATES_DIR = "/home/pi/plates"
 STREAM_JPEG_PATH = os.getenv("GATE_WEB_STREAM_JPEG", "/run/gate-anpr/stream.jpg")
 STREAM_STALE_SECONDS = env_int("GATE_WEB_STREAM_STALE_SECONDS", 15, "gate_anpr_web")
 PREVIEW_LOCK = threading.Lock()
+HOME_SERVICE_LOCK = threading.Lock()
+HOME_SERVICE_CACHE = {"checked_monotonic": None, "checked_at": None, "services": {}}
+UNFAMILIAR_MAX_AGE_SECONDS = 300
 GATE_PIN_BOARD = env_int("GATE_PIN_BOARD", 23, "gate_anpr_web")
 GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
@@ -339,8 +347,8 @@ def _parse_detail(value):
         return value
 
 
-def _query_events(kinds=None, offset=0, limit=60, since=None):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+def _query_events(kinds=None, offset=0, limit=60, since=None, until=None):
+    conn = sqlite3.connect(Path(EVENTS_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
     conn.row_factory = sqlite3.Row
     try:
         clauses = []
@@ -351,6 +359,9 @@ def _query_events(kinds=None, offset=0, limit=60, since=None):
         if since:
             clauses.append("captured_at >= ?")
             params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
+        if until:
+            clauses.append("captured_at <= ?")
+            params.append(until.strftime("%Y-%m-%d %H:%M:%S"))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = conn.execute(
             f"""
@@ -753,21 +764,7 @@ def _maintenance_health():
 
 @app.route("/api/plates", methods=["GET"])
 def get_plates():
-    raw = _read_allowlist()
-    grouped = []
-    if not raw:
-        return jsonify([])
-    if isinstance(raw, list) and raw and isinstance(raw[0], (list, tuple)):
-        owners = {}
-        for plate, owner in raw:
-            owners.setdefault(owner, []).append(plate)
-        for owner, plates in owners.items():
-            grouped.append({"owner": owner, "plates": sorted(set(plates))})
-    elif isinstance(raw, list) and raw and isinstance(raw[0], dict) and "plates" in raw[0]:
-        grouped = raw
-    else:
-        grouped = raw
-    return jsonify(grouped)
+    return jsonify(group_allowlist(_read_allowlist()))
 
 
 @app.route("/api/plates", methods=["PUT"])
@@ -775,50 +772,17 @@ def put_plates():
     err = _check_csrf()
     if err:
         return err
-    data = request.get_json(force=True)
-    if not isinstance(data, list):
-        return jsonify({"error": "expected list"}), 400
-    cleaned = []
-    for item in data:
-        if isinstance(item, dict) and "owner" in item and "plates" in item:
-            owner = str(item["owner"]).strip()
-            plates = item.get("plates") or []
-            if isinstance(plates, str):
-                plates = [plates]
-            norm = [str(p).upper().strip() for p in plates if str(p).strip()]
-            if not owner:
-                return jsonify({"error": "owner required"}), 400
-            if not norm:
-                return jsonify({"error": f"no plates for owner {owner}"}), 400
-            cleaned.append({"owner": owner, "plates": sorted(set(norm))})
-        elif isinstance(item, (list, tuple)) and len(item) == 2:
-            plate = str(item[0]).upper().strip()
-            owner = str(item[1]).strip()
-            cleaned.append({"owner": owner, "plates": [plate]})
-        elif isinstance(item, dict) and "plate" in item and "owner" in item:
-            plate = str(item["plate"]).upper().strip()
-            owner = str(item["owner"]).strip()
-            cleaned.append({"owner": owner, "plates": [plate]})
-        else:
-            return jsonify({"error": f"invalid entry: {item!r}"}), 400
+    try:
+        cleaned = validate_allowlist(request.get_json(force=True))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     _write_allowlist(cleaned)
     return jsonify({"ok": True, "count": len(cleaned)})
 
 
 @app.route("/api/allowlist-status", methods=["GET"])
 def get_allowlist_status():
-    allowlist = _read_allowlist()
-    grouped = []
-    if isinstance(allowlist, list) and allowlist and isinstance(allowlist[0], (list, tuple)):
-        owners = {}
-        for plate, owner in allowlist:
-            owners.setdefault(owner, []).append(plate)
-        for owner, plates in owners.items():
-            grouped.append({"owner": owner, "plates": sorted(set(plates))})
-    elif isinstance(allowlist, list) and allowlist and isinstance(allowlist[0], dict):
-        grouped = allowlist
-    else:
-        grouped = []
+    grouped = group_allowlist(_read_allowlist())
     conn = sqlite3.connect(EVENTS_DB_PATH)
     try:
         rows = conn.execute(
@@ -1535,6 +1499,121 @@ def _systemctl_is_active(service):
     if result.returncode == 3:
         return result.stdout.strip() or "inactive"
     return result.stdout.strip() or "unknown"
+
+
+def _read_home_service_states():
+    names = {
+        "alprd": "alprd",
+        "gate_anpr": "gate_anpr",
+        "stream_jpeg": "gate_anpr_stream_jpeg",
+        "beanstalkd": "beanstalkd",
+    }
+    unknown = dict.fromkeys(names, "unknown")
+    try:
+        result = subprocess.run(["systemctl", "is-active", *names.values()], capture_output=True, text=True, timeout=1)
+        states = result.stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return unknown
+    if len(states) != len(names):
+        return unknown
+    return dict(zip(names, states))
+
+
+def _home_service_snapshot():
+    # Only one browser refreshes this cache. Others get the previous, explicitly
+    # timestamped result rather than occupying web threads waiting for systemd.
+    if HOME_SERVICE_LOCK.acquire(blocking=False):
+        try:
+            checked = HOME_SERVICE_CACHE["checked_monotonic"]
+            if checked is None or time.monotonic() - checked >= 5:
+                HOME_SERVICE_CACHE.update(
+                    services=_read_home_service_states(), checked_at=time.time(), checked_monotonic=time.monotonic()
+                )
+        finally:
+            HOME_SERVICE_LOCK.release()
+    return dict(HOME_SERVICE_CACHE["services"]), HOME_SERVICE_CACHE["checked_at"]
+
+
+def _timestamp_epoch(value):
+    parsed = parse_local_timestamp(value)
+    return parsed.timestamp() if parsed else None
+
+
+def _decision_sampling():
+    return {
+        "per_reason_plate_seconds": RECENT_DECISION_SAMPLE_SECONDS,
+        "global_seconds": RECENT_DECISION_GLOBAL_SAMPLE_SECONDS,
+        "retained_limit": RECENT_DECISIONS_LIMIT,
+    }
+
+
+def _recent_decision_payloads(limit):
+    items = read_recent_decisions(EVENTS_DB_PATH, limit=limit)
+    for item in items:
+        item["plate"] = _display_plate(item["plate"])
+        # A stale-capture decision is recent even though its source image is old.
+        item["seen_at"] = _timestamp_epoch(item["created_at"])
+        image_name = item["image_name"] or ""
+        item["image_url"] = f"/images/{image_name}" if image_name else ""
+        item["preview_url"] = f"/previews/{image_name}?size=640" if image_name else ""
+        item["thumbnail_url"] = f"/previews/{image_name}?size=160" if image_name else ""
+    return items
+
+
+@app.route("/api/decisions", methods=["GET"])
+def get_decisions():
+    try:
+        decisions = _recent_decision_payloads(_int_arg("limit", 30, 1, 100))
+    except sqlite3.Error:
+        return jsonify({"error": "Recognition decisions are temporarily unavailable"}), 503
+    return jsonify({"decisions": decisions, "sampling": _decision_sampling()})
+
+
+@app.route("/api/home-status", methods=["GET"])
+def home_status():
+    now = time.time()
+    until = datetime.fromtimestamp(now)
+    try:
+        recognised = _query_events(kinds=["recognised"], limit=2, until=until)
+        unfamiliar = _query_events(
+            kinds=["unmatched"],
+            limit=1,
+            since=until - timedelta(seconds=UNFAMILIAR_MAX_AGE_SECONDS),
+            until=until,
+        )
+    except sqlite3.Error:
+        return jsonify({"error": "Arrival information is temporarily unavailable"}), 503
+    for event in recognised + unfamiliar:
+        event["seen_at"] = _timestamp_epoch(event["captured_at"])
+    unfamiliar = [event for event in unfamiliar if event["seen_at"] is not None]
+    for event in unfamiliar:
+        event["expires_at"] = event["seen_at"] + UNFAMILIAR_MAX_AGE_SECONDS
+    try:
+        recent_decisions = _recent_decision_payloads(3)
+        decisions_available = True
+    except sqlite3.Error:
+        # An older worker/schema during deployment need not hide camera status.
+        recent_decisions = []
+        decisions_available = False
+    services, checked_at = _home_service_snapshot()
+    now, _, stream_age = _stream_frame_status()
+    return jsonify(
+        {
+            "server_time": now,
+            "stream": {
+                "age_seconds": stream_age,
+                "fresh": stream_age is not None and stream_age <= STREAM_STALE_SECONDS,
+                "stale_after_seconds": STREAM_STALE_SECONDS,
+            },
+            "services": services,
+            "services_checked_at": checked_at,
+            "recognised": recognised,
+            "unfamiliar": unfamiliar,
+            "recent_decisions": recent_decisions,
+            "decisions_available": decisions_available,
+            "decision_sampling": _decision_sampling(),
+        }
+    )
 
 
 def _latest_event_timestamp():

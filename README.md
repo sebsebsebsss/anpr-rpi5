@@ -20,7 +20,22 @@ Development and public contribution checks are in [CONTRIBUTING.md](CONTRIBUTING
 - One-command provisioning on Raspberry Pi 5 (Debian Trixie target).
 - OpenALPR daemon + gate worker + web UI + RTSP stream pipeline.
 - Tablet-friendly interface for live view, events, allowlist edits, and control.
+- Home shows camera/view freshness, the last two recognised arrivals and a
+  five-minute unfamiliar-arrival preview.
+- New events explain the match and relay-command outcome; recent sampled
+  decisions also cover suppressed, stale and failed attempts.
 - Built-in housekeeping: old captures, logs, and event DB retention.
+
+Home distinguishes a stalled displayed image from an old camera frame or an
+unavailable status request. Service activity does not prove recognition is
+progressing, and a relay command does not confirm physical gate movement.
+Recent decision diagnostics retain at most 200 samples, normally one per
+reason/plate/outcome every 30 seconds and at most one per second globally;
+relay-command outcomes bypass the global limit. Existing history is unchanged.
+
+Allowlist entries may contain presentation spaces. Saving validates the whole
+list and rejects registrations that collide after the same OCR character
+correction used by the worker. Failed saves retain the edits on screen.
 
 ## Architecture
 - `alprd`: OpenALPR daemon

@@ -51,13 +51,13 @@
             <div class="card-head">
               <h2>Live view</h2>
               <div class="stream-head-right">
-                <div class="live-badge" aria-live="polite">
-                  <span class="dot dot-live"></span>
-                  Live
+                <div id="tablet-stream-status" class="live-badge status-unknown" role="status">
+                  Checking view…
                 </div>
               </div>
             </div>
             <div class="tablet-stream-frame" id="tablet-stream-frame"></div>
+            <div id="tablet-system-status" class="home-system-status">Checking services…</div>
           </div>
 
           <div class="card tablet-gate">
@@ -69,6 +69,7 @@
               Gate ready
             </div>
             <div id="tablet-cooldown" class="gate-last">Opening the gate: --</div>
+            <div id="home-decision" class="home-decision" hidden></div>
           </div>
 
           <div class="card tablet-timeline">
@@ -77,6 +78,8 @@
               <div class="legend">Last 2 detections</div>
             </div>
             <div id="tablet-timeline-list" class="tablet-timeline-list"></div>
+            <div id="home-unfamiliar" class="home-unfamiliar" hidden></div>
+            <div id="home-arrival-status" class="meta" hidden></div>
           </div>
         </div>
       </section>

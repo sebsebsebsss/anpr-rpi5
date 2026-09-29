@@ -8,6 +8,11 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+RECENT_DECISIONS_LIMIT = 200
+RECENT_DECISION_SAMPLE_SECONDS = 30
+RECENT_DECISION_GLOBAL_SAMPLE_SECONDS = 1
 
 
 def env_int(name, default, logger_name="gate_runtime"):
@@ -97,6 +102,22 @@ def init_events_db(db_path):
         ensure_column(conn, "events", "fuzzy", "INTEGER")
         ensure_column(conn, "events", "request_ip", "TEXT")
         ensure_column(conn, "events", "detail", "TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recent_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plate TEXT,
+                observed_plate TEXT,
+                owner TEXT,
+                confidence REAL,
+                image_name TEXT,
+                captured_at TEXT,
+                created_at TEXT NOT NULL,
+                detail TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -171,6 +192,82 @@ def insert_event(
             ),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def insert_recent_decision(
+    db_path,
+    *,
+    plate="",
+    observed_plate="",
+    owner="",
+    confidence=None,
+    image_name="",
+    captured_at=None,
+    detail,
+):
+    """Store one diagnostic sample without allowing this table to grow indefinitely.
+
+    The caller handles failures separately from gate actions and ordinary event
+    persistence. A busy diagnostic write must not hold up the recognition loop.
+    """
+    conn = sqlite3.connect(db_path, timeout=0.05)
+    try:
+        conn.execute(
+            """
+            INSERT INTO recent_decisions (
+                plate, observed_plate, owner, confidence, image_name,
+                captured_at, created_at, detail
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plate,
+                observed_plate,
+                owner,
+                confidence,
+                image_name,
+                captured_at,
+                now_local_str(),
+                json.dumps(detail, separators=(",", ":"), sort_keys=True),
+            ),
+        )
+        conn.execute(
+            """
+            DELETE FROM recent_decisions
+            WHERE id NOT IN (SELECT id FROM recent_decisions ORDER BY id DESC LIMIT ?)
+            """,
+            (RECENT_DECISIONS_LIMIT,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def read_recent_decisions(db_path, limit=30):
+    """Read bounded diagnostic samples; missing/unreadable storage raises normally."""
+    limit = max(1, min(100, int(limit)))
+    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, plate, observed_plate, owner, confidence, image_name,
+                   captured_at, created_at, detail
+            FROM recent_decisions ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        decisions = []
+        for row in rows:
+            item = dict(row)
+            try:
+                detail = json.loads(item["detail"])
+                item["detail"] = detail if isinstance(detail, dict) else None
+            except (TypeError, ValueError):
+                item["detail"] = None
+            decisions.append(item)
+        return decisions
     finally:
         conn.close()
 

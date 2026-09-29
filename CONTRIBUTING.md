@@ -16,6 +16,7 @@ node tests/stream_refresh.js
 node tests/history.js
 node tests/gate_controls.js
 node tests/web_diagnostics.js
+node tests/home_status.js
 git diff --check
 ```
 
@@ -26,6 +27,10 @@ Use synthetic plates and owners in new fixtures.
 The optional `tests/browser_smoke.py` requires Playwright and Chrome. It blocks
 non-GET/HEAD requests. Its iPad option exercises the legacy user-agent path in
 Chrome; physical iPad testing is still needed for old WebKit behaviour.
+
+`tests/home_browser.py` checks Home and allowlist editing in Chrome using local
+assets and intercepted synthetic responses. It sends no requests to the Pi.
+Its optional `--output-dir /tmp/gate-ui-preview` screenshots are safe to share.
 
 `tests/synthetic_job.py` defaults to a JSON preview. `--enqueue` sends to a real
 worker and can activate the gate if the plate is allowed. Do not use the real
