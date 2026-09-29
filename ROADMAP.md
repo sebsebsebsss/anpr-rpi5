@@ -79,7 +79,7 @@ UX-10/UX-11 implementation is on `design/device-layout-and-insights`.
 
 | ID | Effort | Improvement | Success measure / constraint |
 |---|---|---|---|
-| PERF-01 | Deferred pending archive review / M | Supported detector mask | Inventory/review every retained image, including unlinked files; compare baseline/candidate on the full private manifest; retain generous approach margins and validate timing separately. Installed `detection_mask_image` reduces the search rectangle; daemon `roi=` is ignored. No mask applied; savings unmeasured. |
+| PERF-01 | Audit complete; mask deferred / M | Supported detector mask | All 13,401 retained files inventoried; 13,400 decodable representations reviewed with 19 full-resolution follow-ups. One incomplete JPEG and three artifact frames limit certainty. Full-width/top 85% is an offline candidate: 14.94% fewer detector pixels, CPU saving unmeasured. No mask applied; require parity and arrival-timing evidence before deployment. |
 | PERF-02 | L | Activity-adaptive recognition | Keep a low baseline analysis rate and burst during activity; measure heat/CPU and arrival latency; test slow vehicles, rain and shadows. Depends on REC-01. |
 | PERF-03 | Deployed; physical-screen observation pending | Small-screen preview profiles | One decoder publishes main 960×540, tablet 800×450 and kiosk 640×360 at 10fps. Main Live view retained; profiles optional. Pi measured ~9.9 distinct JPEGs/s; actual iPad/Pi smoothness remains to observe. Extra encoding adds about 2 percentage points of whole-Pi CPU. |
 | PERF-04 | Deferred / L | Modern video transport | Compare a compressed video relay for capable clients while retaining JPEG support for old displays; justify additional complexity with measurements. |
@@ -141,9 +141,19 @@ Large gate controls, uncropped camera framing and optional HTTPS are retained.
   published about 9.9 distinct JPEGs/sec. Physical-device smoothness remains
   an observation, not a result established by changing a Chrome user agent.
 - The existing status disclosure exposes CSS viewport, JPEG dimensions and
-  image loads/sec. Profiles default off in public configuration. Detailed CPU
+  image loads/sec. The owner subsequently confirmed that the physical iPad
+  renders perfectly; its actual frame rate has not been reported.
+  Profiles default off in public configuration. Detailed CPU
   measurements and the unsuccessful, reverted OCR-thread trial are recorded in
   [performance notes](docs/PERFORMANCE.md).
+
+The retained-image audit also completed: every file was accounted for, all
+13,400 decodable images were reviewed through contact sheets, and 19 originals
+received full-resolution follow-up. One incomplete JPEG and three visibly damaged
+frames are documented privately. A full-width lower 15% exclusion would reduce
+detector search pixels by 14.94%, with no measured total-CPU saving. No mask or
+recognition policy change was applied; PERF-01 stays deferred pending parity and
+timing evidence. Private captures and audit identifiers are excluded from GitHub.
 
 ## Wall-screen deployment verification — 2026-09-29
 

@@ -67,6 +67,10 @@ about **2.2 percentage points of whole-Pi capacity**. Recognition measured
 146.28% before and 147.91% after. These are short windows, not a controlled
 thermal study. Archive indexing was running separately at low priority during
 this work; the 63.9°C sample is not attributable to preview profiles alone.
+After archive processing stopped, a second twenty-second sample measured
+21.75% preview CPU, 144.37% recognition CPU, 59.5°C, and 9.85–9.95 distinct
+JPEGs/sec across the profiles.
+
 Recognition and gate-worker PIDs, their configuration hashes and all unrelated
 environment settings were unchanged by the deployment. All six checked services
 were active, twelve deployed files matched local hashes and the frames were
@@ -74,7 +78,9 @@ fresh. The independent preview restoration timer was then cancelled; the private
 backup remains available.
 
 Live read-only Chrome samples completed **9.6–9.9 image loads/sec** across the
-iPad, Pi and desktop viewport cases. The physical wall devices may differ.
+iPad, Pi and desktop viewport cases. The owner confirmed that the physical iPad
+now renders perfectly. Its actual image-load rate has not been reported; physical
+wall-device smoothness may differ from the Chrome measurements.
 
 ## OCR threads: trial completed, original setting restored
 
@@ -112,6 +118,35 @@ current database row. Full-coverage contact sheets and full-resolution inspectio
 of ambiguous cases support an archive review; they are not a recognition parity
 benchmark. Private captures, image names, plates and credentials stay outside
 this public repository. No mask is applied by the audit.
+
+The completed inventory contains **13,401 files: 13,294 full-size originals
+and 107 cached previews**. Every original is 2688×1520. All **13,400 normally
+decodable images** were represented and visually reviewed across 134 contact
+sheets; 19 follow-up originals were checked at full resolution and their hashes
+matched the source manifest. This is full-archive coverage using audit-resolution
+copies, not a claim that every full-size original was downloaded locally.
+The final delta check found no added, missing or modified source files.
+
+One original failed normal decoding; permissive recovery still leaves most of
+its image missing. Three other originals contain visible encoding artifacts,
+including one with an obscured plate. Those cases remain explicit limitations,
+not verified successful reads. No files were deleted or repaired on the Pi.
+
+Across interpretable images the camera view remained consistent. Plates occur
+near the side edges and approach road, so retain **all width and the top**.
+The lowest inspected close-approach plate reaches approximately 70.3% of frame
+height; a conservative observed bound is 72%. Keeping the top 85% leaves about
+223 source pixels below that observed plate. Excluding the bottom 15% is therefore
+a plausible **offline test candidate**, not a production recommendation. Given
+the excellent reported hit rate and modest potential benefit, keep full-frame
+recognition until a separate parity and timing comparison justifies a change.
+
+The installed resize code is width-first: when source width exceeds 1280, it
+uses that width ratio and skips the 720-height branch. Integer output dimensions
+therefore make the current 2688×1520 input **1280×723**, despite the nominal
+1280×720 configuration. Retaining full width and 85% height (2688×1292) yields
+**1280×615**, or **14.94% fewer detector-search pixels**. Original-frame area
+falls 15%. This is geometry only; total CPU savings remain unmeasured.
 
 The installed `detection_mask_image` option is relevant; the daemon's `roi=`
 option is ignored. OpenALPR crops to the mask's bounding rectangle **before**
