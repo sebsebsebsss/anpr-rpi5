@@ -16,7 +16,7 @@ function setup(options = {}) {
   let loaded = 0;
   const document = {
     hidden: false,
-    body: { classList: { contains: () => false } },
+    body: { classList: { contains: (name) => name === "fullscreen-page" && !!options.kiosk } },
     getElementById: () => null,
     querySelector: () => null,
   };
@@ -66,12 +66,12 @@ function setup(options = {}) {
   const fetch = () => new Promise(() => {});
   const app = new Function(
     "document", "window", "navigator", "Image", "setTimeout", "clearTimeout", "fetch", "Date",
-    source + "\nreturn { createLegacyStreamImage, state, LEGACY_IOS };"
-  )(document, { fetch }, { userAgent: "iPad; CPU OS 12_5_8 like Mac OS X" },
+    source + "\nreturn { createLegacyStreamImage, homeStreamUrl, state, LEGACY_IOS };"
+  )(document, { fetch, innerWidth: options.width || 1280 }, { userAgent: options.userAgent || "iPad; CPU OS 12_5_8 like Mac OS X" },
     Image, setTimeout, clearTimeout, fetch, { now: () => now });
-  assert(app.LEGACY_IOS, "iPad mini 3 must use the legacy stream");
+  if (!options.userAgent) assert(app.LEGACY_IOS, "iPad mini 3 must use the legacy stream");
   app.createLegacyStreamImage("/static/stream.jpg?camera=gate");
-  return { advance, requests, options, document, state: app.state, loaded: () => loaded };
+  return { app, advance, requests, options, document, state: app.state, loaded: () => loaded };
 }
 
 const slow = setup();
@@ -124,4 +124,13 @@ inactive.options.inactive = false;
 inactive.advance(1100);
 assert(inactive.loaded() >= 1, "Switching back to the stream must resume frames");
 
-report("Stream refresh regression checks passed");
+const profiles = { url: "/static/stream.jpg", profiles: {
+  tablet: "/static/stream-tablet.jpg", kiosk: "/static/stream-kiosk.jpg",
+} };
+assert(setup().app.homeStreamUrl(profiles) === profiles.profiles.tablet, "Old iPad Home uses its smaller JPEG");
+assert(setup({kiosk: true, userAgent: "Chrome"}).app.homeStreamUrl(profiles) === profiles.profiles.kiosk, "Pi one-pager uses the smallest JPEG");
+assert(setup({userAgent: "Chrome", width: 1440}).app.homeStreamUrl(profiles) === profiles.url, "Large desktop Home retains full-size JPEG");
+assert(setup({userAgent: "Chrome", width: 390}).app.homeStreamUrl(profiles) === profiles.profiles.tablet, "Phone Home can use the compact JPEG");
+assert(setup().app.homeStreamUrl({url: profiles.url}) === profiles.url, "Older servers retain the original feed");
+assert(setup().app.homeStreamUrl({url: profiles.url, profiles: {tablet: "https://untrusted.example/frame"}}) === profiles.url, "Profile selection accepts only known local JPEG paths");
+report("Stream refresh and device profile regression checks passed");

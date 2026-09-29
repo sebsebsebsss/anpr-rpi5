@@ -81,9 +81,9 @@ UX-10/UX-11 implementation is on `design/device-layout-and-insights`.
 |---|---|---|---|
 | PERF-01 | Deferred pending archive review / M | Supported detector mask | Inventory/review every retained image, including unlinked files; compare baseline/candidate on the full private manifest; retain generous approach margins and validate timing separately. Installed `detection_mask_image` reduces the search rectangle; daemon `roi=` is ignored. No mask applied; savings unmeasured. |
 | PERF-02 | L | Activity-adaptive recognition | Keep a low baseline analysis rate and burst during activity; measure heat/CPU and arrival latency; test slow vehicles, rain and shadows. Depends on REC-01. |
-| PERF-03 | Optional S/M trial | Small-screen preview profile | Compare 960×540 → 800×450 → restore, all at 10fps with one encoder; timed restoration; measure distinct displayed frames, responsiveness and detail on both wall screens. Recognition input stays unchanged. |
+| PERF-03 | Deployed; physical-screen observation pending | Small-screen preview profiles | One decoder publishes main 960×540, tablet 800×450 and kiosk 640×360 at 10fps. Main Live view retained; profiles optional. Pi measured ~9.9 distinct JPEGs/s; actual iPad/Pi smoothness remains to observe. Extra encoding adds about 2 percentage points of whole-Pi CPU. |
 | PERF-04 | Deferred / L | Modern video transport | Compare a compressed video relay for capable clients while retaining JPEG support for old displays; justify additional complexity with measurements. |
-| PERF-05 | Offline comparison first / S/M | Limit nested OCR threads | Compare unset against `OMP_THREAD_LIMIT=1` on identical private images, with GPIO/network inaccessible and resource limits. No guaranteed saving. Defer daemon trial until restart/dependent-worker and cooldown risks have a tested restoration path. |
+| PERF-05 | Trial complete; reverted | Limit nested OCR threads | Authorised guarded quiet-scene unset → 1 → unset trial found no meaningful saving (144.88% versus 144.76% of one core). Original settings and services restored. No busy-arrival or OCR-parity claim; see performance notes. |
 
 The source probe reports an average of 10fps. Confirm actual distinct source
 frames during movement before selecting a higher preview rate; raising the JPEG
@@ -116,6 +116,34 @@ output setting alone cannot create additional source frames.
 
 Each new completion should record its commit, automated checks, deployed checks,
 and remaining physical-device or real-vehicle verification here.
+
+## Safari viewport and JPEG profiles — 2026-09-29
+
+The actual iPad exposed a Safari summary-layout quirk and a smaller visible
+height after its address banner appeared. The latest-check disclosure now uses
+an ordinary flex child, and fixed wall layouts follow the visible viewport.
+Large gate controls, uncropped camera framing and optional HTTPS are retained.
+
+- 353 Python tests, all six JavaScript suites, Ruff, diff and Ansible syntax
+  checks passed. Synthetic browser checks cover both themes, unfamiliar arrivals,
+  legacy layout fallbacks and Safari-height viewports down to 1024×680.
+- Targeted web/preview Ansible deployment: 53 successful tasks, no failures.
+  Twelve deployed files match local hashes. Original recognition/worker process
+  IDs and configuration hashes are unchanged, as are unrelated env settings.
+  All six checked services are active. A private backup remains available; the
+  independent timed preview rollback was cancelled after verification.
+- Read-only live Chrome checks passed at iPad 1024×704/680, kiosk 800×480 and
+  1024×600, and desktop 1600×1000. No document overflow or camera cropping;
+  iPad gate buttons are 217×456/432 and the small Pi button is 196×343.
+  Latest-check rows stay 36px/32px high. No gate commands were sent.
+- iPad Home loads 800×450, Pi `/fullscreen` 640×360 and Live `#stream` retains
+  960×540. Live browser samples completed 9.6–9.9 image loads/sec; the Pi
+  published about 9.9 distinct JPEGs/sec. Physical-device smoothness remains
+  an observation, not a result established by changing a Chrome user agent.
+- The existing status disclosure exposes CSS viewport, JPEG dimensions and
+  image loads/sec. Profiles default off in public configuration. Detailed CPU
+  measurements and the unsuccessful, reverted OCR-thread trial are recorded in
+  [performance notes](docs/PERFORMANCE.md).
 
 ## Wall-screen deployment verification — 2026-09-29
 

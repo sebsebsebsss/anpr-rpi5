@@ -445,8 +445,27 @@ Deploy reads the persisted Pi stream settings, preserving its camera URL,
 frame rate and resolution when the controller has an older local env file.
 For a targeted adjustment, pass an extra-vars file with `gate_stream_overrides`,
 for example `{"gate_stream_overrides":{"GATE_WEB_STREAM_WIDTH":960,
-"GATE_WEB_STREAM_HEIGHT":540,"GATE_WEB_STREAM_FPS":10}}`. Only these three keys
-are accepted, so this does not replace camera credentials or other configuration.
+"GATE_WEB_STREAM_HEIGHT":540,"GATE_WEB_STREAM_FPS":10}}`. Run with
+`--tags web,preview` for an existing installation. This updates preview/web
+services without restarting recognition or the gate worker.
+
+Optional smaller JPEGs help older screens transfer and decode fewer pixels.
+Set `GATE_WEB_STREAM_PROFILES=1`, `GATE_WEB_STREAM_TABLET_WIDTH=800` and
+`GATE_WEB_STREAM_KIOSK_WIDTH=640` through the same `gate_stream_overrides` map.
+Profiles default off. When enabled, iPad/small-screen Home uses the tablet image,
+`/fullscreen` uses the kiosk image, and the Live tab (`#stream`) keeps the main
+JPEG. Display size and camera framing stay unchanged. The three outputs share
+one camera connection and decoder; encoding the extra images costs some Pi CPU.
+They are atomically published in RAM and served directly by nginx. If a profile
+is absent, nginx serves the main JPEG instead. Custom external feeds are unchanged.
+
+Only the three main dimensions/rate settings and these three profile settings
+are accepted as stream overrides; camera credentials and other configuration
+are preserved. Set `GATE_WEB_STREAM_PROFILES=0` with the same deployment tags to
+return every screen to the main JPEG. Both HTTP and optional HTTPS support the
+profiles. Home's **View updating** disclosure reports visible CSS viewport,
+JPEG dimensions and recent image loads/second; loads can include repeated frames
+and do not prove the camera's distinct frame rate.
 
 ## Backups
 

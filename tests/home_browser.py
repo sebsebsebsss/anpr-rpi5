@@ -27,6 +27,8 @@ IPAD_UA = (
 # larger than the deployed dcec8ae button bounds measured with the same fixture.
 WALL_BUTTON_MINIMA = {
     (1024, 748, "/"): (216, 499),
+    (1024, 704, "/"): (216, 455),
+    (1024, 680, "/"): (216, 431),
     (800, 480, "/fullscreen"): (195, 342),
     (1024, 600, "/fullscreen"): (256, 462),
     (1280, 800, "/fullscreen"): (326, 662),
@@ -45,6 +47,11 @@ def main():
     image_buffer = BytesIO()
     Image.new("RGB", (640, 360), (67, 87, 79)).save(image_buffer, "JPEG")
     image = image_buffer.getvalue()
+    profiles = {}
+    for name, size in (("stream.jpg", (960, 540)), ("stream-tablet.jpg", (800, 450)), ("stream-kiosk.jpg", (640, 360))):
+        buffer = BytesIO()
+        Image.new("RGB", size, (67, 87, 79)).save(buffer, "JPEG")
+        profiles["/static/" + name] = buffer.getvalue()
     fixture = {
         "frame_error": False,
         "source_stale": False,
@@ -97,11 +104,11 @@ def main():
             counters["unexpected_requests"] += 1
             route.abort()
             return
-        if path == "/static/stream.jpg":
+        if path in profiles:
             if fixture["frame_error"]:
                 route.abort()
             else:
-                route.fulfill(body=image, content_type="image/jpeg")
+                route.fulfill(body=profiles[path], content_type="image/jpeg")
             return
         if path.startswith("/previews/"):
             route.fulfill(body=image, content_type="image/jpeg")
@@ -148,7 +155,10 @@ def main():
         apis = {
             "/api/config": {"stream_fps": 5, "group_window_sec": 60},
             "/api/ui-settings": {"theme_mode": "light"},
-            "/api/stream": {"url": "/static/stream.jpg"},
+            "/api/stream": {
+                "url": "/static/stream.jpg",
+                "profiles": {"tablet": "/static/stream-tablet.jpg", "kiosk": "/static/stream-kiosk.jpg"},
+            },
             "/api/events": [event(2, "TEST123", "recognised")],
             "/api/gate-cooldown": {"remaining": 0},
             "/api/gate-last-open": {"last_open_ts": None},
@@ -177,6 +187,9 @@ def main():
                 # Exercise the legacy sizing fallback in Chrome without claiming
                 # that a user agent string emulates the old WebKit engine.
                 content = content.replace(b"@supports not (aspect-ratio: 1 / 1)", b"@supports (display: grid)")
+                # Old Safari's vh can remain at the screen height after its URL
+                # banner appears. Reproduce that disagreement with innerHeight.
+                content = content.replace(b"100vh", b"768px")
             route.fulfill(body=content, content_type=mimetypes.guess_type(local.name)[0] or "application/octet-stream")
             return
         # Optional absent icons should not trigger any external network access.
@@ -195,6 +208,11 @@ def main():
 
         def ready():
             page.wait_for_function("document.getElementById('tablet-stream-status').textContent === 'View updating'")
+            expected_width = 640 if urlsplit(page.url).path == "/fullscreen" else 800
+            page.wait_for_function(
+                "width => document.querySelector('#tablet-stream-frame img').naturalWidth === width",
+                arg=expected_width,
+            )
             page.locator("#home-unfamiliar").wait_for(state="visible" if fixture["unfamiliar"] else "hidden")
             require(
                 page.locator("#tablet-timeline-list .tablet-timeline-row").count() == 2, "recognised arrivals missing"
@@ -246,6 +264,12 @@ def main():
             require(geometry["scrollY"] == 0, "wall Home must remain at the top of its viewport")
             require(geometry["panelsFit"], "wall panels must fit without scrolling or hiding overflow")
             require(geometry["contentsFit"], "wall content extends outside its card")
+            decision = page.locator("#home-decision .decision-summary")
+            if decision.count():
+                require(
+                    decision.evaluate("row => row.getBoundingClientRect().height <= 36"),
+                    "the latest-check summary must stay a compact row on wall screens",
+                )
             minimum = WALL_BUTTON_MINIMA.get((size["width"], size["height"], path))
             if minimum:
                 require(geometry["button"]["width"] >= minimum[0], "wall gate target became narrower")
@@ -305,6 +329,8 @@ def main():
             (390, 664, "/", "phone-browser"),
             (320, 568, "/", "small-phone"),
             (1024, 748, "/", "ipad"),
+            (1024, 704, "/", "ipad-safari-banner"),
+            (1024, 680, "/", "ipad-safari-tall-banner"),
             (800, 480, "/fullscreen", "kiosk-small"),
             (1024, 600, "/fullscreen", "kiosk-wide"),
             (1280, 800, "/fullscreen", "kiosk-large"),
@@ -352,7 +378,12 @@ def main():
                 "camera image must remain uncropped",
             )
         fixture["legacy_layout"] = True
-        for width, height, path in ((1024, 748, "/"), (800, 480, "/fullscreen"), (390, 664, "/")):
+        for width, height, path in (
+            (1024, 704, "/"),
+            (1024, 680, "/"),
+            (800, 480, "/fullscreen"),
+            (390, 664, "/"),
+        ):
             page.set_viewport_size({"width": width, "height": height})
             page.goto("http://gate.test" + path, wait_until="domcontentloaded")
             ready()
@@ -360,7 +391,10 @@ def main():
                 page.locator("#tablet-stream-frame").bounding_box()["height"] >= 100,
                 "legacy image sizing fallback collapsed the camera",
             )
-            screenshot("home-legacy-layout-" + str(width) + ".png")
+            # Force summary's block rendering, as in iOS 12: the child must
+            # supply flex layout rather than relying on summary doing so.
+            page.add_style_tag(content=".home-decision summary { display: block !important; }")
+            screenshot("home-legacy-layout-" + str(width) + "x" + str(height) + ".png")
         fixture["legacy_layout"] = False
         # Home's viewport contract must not constrain other tabs. Returning
         # after scrolling Stats must restore a genuinely unscrolled Home.

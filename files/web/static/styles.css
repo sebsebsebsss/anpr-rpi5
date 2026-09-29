@@ -635,9 +635,7 @@ body.theme-dark .log-ts {
 
 .home-decision summary {
   position: relative;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  display: block;
   min-height: 36px;
   padding-right: 16px;
   cursor: pointer;
@@ -646,7 +644,16 @@ body.theme-dark .log-ts {
   list-style: none;
 }
 
-.home-decision summary > * {
+.home-decision .decision-summary {
+  /* Old Safari treats summary as a special block, ignoring display:flex.
+     An ordinary child preserves one compact row and the native disclosure. */
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: inherit;
+}
+
+.home-decision .decision-summary > * {
   margin-right: 8px;
 }
 
@@ -1945,6 +1952,7 @@ textarea {
 @media (min-width: 900px) {
   body.main-page.home-active {
     height: 100vh;
+    height: var(--home-viewport-height, 100vh);
     display: flex;
     flex-direction: column;
   }
@@ -2010,6 +2018,7 @@ textarea {
 @media (min-width: 721px) {
   body.fullscreen-page.home-active {
     height: 100vh;
+    height: var(--home-viewport-height, 100vh);
     display: flex;
     flex-direction: column;
   }

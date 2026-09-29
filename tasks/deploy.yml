@@ -346,20 +346,24 @@
   assert:
     that:
       - gate_stream_overrides is mapping
-      - "gate_stream_overrides.keys() | difference(['GATE_WEB_STREAM_WIDTH', 'GATE_WEB_STREAM_HEIGHT', 'GATE_WEB_STREAM_FPS']) | length == 0"
-    fail_msg: "gate_stream_overrides only accepts JPEG preview width, height and FPS."
+      - "gate_stream_overrides.keys() | difference(['GATE_WEB_STREAM_WIDTH', 'GATE_WEB_STREAM_HEIGHT', 'GATE_WEB_STREAM_FPS', 'GATE_WEB_STREAM_PROFILES', 'GATE_WEB_STREAM_TABLET_WIDTH', 'GATE_WEB_STREAM_KIOSK_WIDTH']) | length == 0"
+    fail_msg: "gate_stream_overrides only accepts JPEG preview dimensions, FPS and profile settings."
   tags:
     - deploy
+    - preview
 
 - name: Validate explicit stream override values
   assert:
     that:
-      - "item.value | string is match('^[0-9]+(\\.[0-9]+)?$' if item.key == 'GATE_WEB_STREAM_FPS' else '^[1-9][0-9]*$')"
-      - item.value | float > 0
-    fail_msg: "Stream dimensions must be positive integers and FPS a positive number."
+      - "item.value | string is match('^[01]$' if item.key == 'GATE_WEB_STREAM_PROFILES' else ('^[0-9]+(\\.[0-9]+)?$' if item.key == 'GATE_WEB_STREAM_FPS' else '^[1-9][0-9]*$'))"
+      - "item.key == 'GATE_WEB_STREAM_PROFILES' or item.value | float > 0"
+      - "item.key != 'GATE_WEB_STREAM_FPS' or item.value | float <= 30"
+      - "item.key in ['GATE_WEB_STREAM_PROFILES', 'GATE_WEB_STREAM_FPS'] or (item.value | int >= 16 and item.value | int <= 4096 and item.value | int % 2 == 0)"
+    fail_msg: "Dimensions must be even integers 16..4096; FPS must be positive and at most 30; profiles must be 0 or 1."
   loop: "{{ gate_stream_overrides | dict2items }}"
   tags:
     - deploy
+    - preview
 
 - name: Apply explicit stream tuning without replacing other Pi configuration
   lineinfile:
@@ -376,6 +380,7 @@
     - restart gate_anpr_stream_jpeg
   tags:
     - deploy
+    - preview
 
 - name: Read persisted web stream configuration
   command:
@@ -829,6 +834,20 @@
   when: gate_web_stream_rtsp_url | length > 0
   tags:
     - deploy
+    - preview
+
+- name: Install shared-decoder JPEG profile publisher
+  copy:
+    src: files/gate_anpr_preview.py
+    dest: /usr/local/bin/gate_anpr_preview.py
+    owner: root
+    group: root
+    mode: "0755"
+  when: gate_web_stream_rtsp_url | length > 0
+  notify: restart gate_anpr_stream_jpeg
+  tags:
+    - deploy
+    - preview
 
 - name: Install systemd unit for gate_anpr_stream_jpeg
   copy:
@@ -851,7 +870,7 @@
       RuntimeDirectoryMode=0755
       RuntimeDirectoryPreserve=yes
       Environment=GATE_WEB_STREAM_RTSP_URL={{ gate_web_stream_rtsp_url }}
-      ExecStart=/bin/sh -c 'exec ionice -c2 -n7 nice -n 10 /usr/bin/ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -analyzeduration 0 -probesize 32k -max_delay 0 -rtsp_transport tcp -i ${GATE_WEB_STREAM_RTSP_URL} -an -vf fps=${GATE_WEB_STREAM_FPS},scale=${GATE_WEB_STREAM_WIDTH}:${GATE_WEB_STREAM_HEIGHT} -q:v 7 -f image2pipe -vcodec mjpeg - | /usr/bin/python3 /usr/local/bin/gate_anpr_stream_writer.py {{ gate_web_stream_jpeg }}'
+      ExecStart=/usr/bin/ionice -c2 -n7 /usr/bin/nice -n 10 /usr/bin/python3 /usr/local/bin/gate_anpr_preview.py {{ gate_web_stream_jpeg }}
       Restart=always
       RestartSec=5s
 
@@ -863,6 +882,7 @@
     - restart gate_anpr_stream_jpeg
   tags:
     - deploy
+    - preview
 
 - name: Enable and start services
   systemd:

@@ -63,6 +63,7 @@ const state = {
 const visibleTabPollers = [];
 const HOME_STATUS_MAX_AGE_MS = 20000;
 const DISPLAY_STALE_MS = 10000;
+const DISPLAY_LOAD_WINDOW_MS = 5000;
 
 const LEGACY_IOS =
   /iP(ad|hone|od)/.test(navigator.userAgent || "") &&
@@ -375,7 +376,9 @@ function createLegacyStreamImage(url) {
   img.alt = "Live stream";
   img.className = "stream-image-single";
   // Updated only by this displayed image's own load/error/watchdog events.
-  img.gateFrameState = { loadedAt: null, lastResult: "loading" };
+  img.gateFrameState = {
+    loadedAt: null, lastResult: "loading", startedAt: Date.now(), loadTimes: [], width: 0, height: 0,
+  };
   let timer = null;
   let requestTimeout = null;
   let requestStartedAt = 0;
@@ -401,8 +404,18 @@ function createLegacyStreamImage(url) {
     // The interval includes download/decode time; adding it after each load
     // unnecessarily reduced 10 fps streams to 3–4 fps on slower screens.
     img.onload = () => {
-      img.gateFrameState.loadedAt = Date.now();
-      img.gateFrameState.lastResult = "loaded";
+      const frame = img.gateFrameState;
+      const loadedAt = Date.now();
+      frame.loadedAt = loadedAt;
+      frame.lastResult = "loaded";
+      frame.width = img.naturalWidth || 0;
+      frame.height = img.naturalHeight || 0;
+      frame.loadTimes.push(loadedAt);
+      // Count browser image-load completions, not distinct camera frames.
+      // Only load events mutate this small buffer; no additional polling.
+      while (frame.loadTimes.length > 128 || frame.loadTimes[0] <= loadedAt - DISPLAY_LOAD_WINDOW_MS) {
+        frame.loadTimes.shift();
+      }
       finish(Math.max(0, STREAM_REFRESH_MS - (Date.now() - requestStartedAt)));
     };
     img.onerror = () => {
@@ -1607,7 +1620,29 @@ async function initCooldownStatus() {
   }
 }
 
+function initHomeViewport() {
+  // iOS 12's 100vh includes space behind Safari's address bar. Use the actual
+  // visible height for the fixed wall layouts, leaving other tabs and phones
+  // free to scroll. Modern browsers also report changing browser chrome here.
+  const viewport = window.visualViewport;
+  const update = () => {
+    let height = window.innerHeight;
+    if (viewport && viewport.scale === 1 && viewport.height > 0) {
+      height = Math.min(height, viewport.height);
+    }
+    if (Number.isFinite(height) && height > 0) {
+      document.documentElement.style.setProperty("--home-viewport-height", `${Math.floor(height)}px`);
+    }
+  };
+  update();
+  window.addEventListener("resize", update);
+  window.addEventListener("orientationchange", update);
+  window.addEventListener("pageshow", update);
+  if (viewport) viewport.addEventListener("resize", update);
+}
+
 async function initMain() {
+  initHomeViewport();
   try {
     const resp = await fetch("/api/config");
     const data = await resp.json();
@@ -1662,6 +1697,19 @@ async function initTablet() {
   initCooldownStatus();
 }
 
+function homeStreamUrl(data) {
+  let url = (data.url || "").trim();
+  if (LEGACY_IOS) url = "/static/stream.jpg";
+  if (url !== "/static/stream.jpg") return url;
+  const profiles = data.profiles || {};
+  const kiosk = document.body.classList.contains("fullscreen-page");
+  const tablet = /iP(ad|hone|od)/.test(navigator.userAgent || "") || window.innerWidth <= 1100;
+  const profile = kiosk ? "kiosk" : tablet ? "tablet" : null;
+  // Only the known local JPEG endpoints can replace the configured feed.
+  const candidate = profile && profiles[profile];
+  return candidate === `/static/stream-${profile}.jpg` ? candidate : url;
+}
+
 async function initTabletStream() {
   const frame = document.getElementById("tablet-stream-frame");
   if (!frame) return;
@@ -1669,7 +1717,7 @@ async function initTabletStream() {
     const resp = await fetch("/api/stream");
     if (!resp.ok) throw new Error("Stream configuration unavailable");
     const data = await resp.json();
-    let url = (data.url || "").trim();
+    const url = homeStreamUrl(data);
     if (!url) {
       state.homeStreamError = "No stream configured";
       renderHomeStatus();
@@ -1681,9 +1729,9 @@ async function initTabletStream() {
       renderHomeStatus();
       return;
     }
-    if (LEGACY_IOS) url = "/static/stream.jpg";
     const parsed = new URL(url, window.location.href);
-    state.homeSourceIsLocal = parsed.origin === window.location.origin && parsed.pathname === "/static/stream.jpg";
+    state.homeSourceIsLocal = parsed.origin === window.location.origin &&
+      /^\/static\/stream(?:-tablet|-kiosk)?\.jpg$/.test(parsed.pathname);
     const stack = LEGACY_IOS ? createLegacyStreamImage(url) : createSmoothImageStream(url);
     frame.innerHTML = "";
     frame.appendChild(stack);
@@ -1776,6 +1824,27 @@ function renderHomeStatus() {
         return `${serviceLabels[key]} ${services[key] === "inactive" || services[key] === "failed" ? "inactive" : "unknown"}`;
       }).join("; ") : "Services active");
     }
+    let viewportHeight = window.innerHeight;
+    const viewport = window.visualViewport;
+    if (viewport && viewport.scale === 1 && viewport.height > 0) {
+      viewportHeight = Math.min(viewportHeight, viewport.height);
+    }
+    if (window.innerWidth > 0 && viewportHeight > 0) {
+      parts.push(`Viewport ${Math.floor(window.innerWidth)}×${Math.floor(viewportHeight)} CSS px`);
+    }
+    if (frame && frame.width > 0 && frame.height > 0) {
+      parts.push(`JPEG ${frame.width}×${frame.height}`);
+    }
+    if (frame && Array.isArray(frame.loadTimes)) {
+      const measuredAt = Date.now();
+      const duration = Math.min(DISPLAY_LOAD_WINDOW_MS, Math.max(0, measuredAt - frame.startedAt));
+      if (duration >= 1000) {
+        const recentLoads = frame.loadTimes.filter((time) => time > measuredAt - DISPLAY_LOAD_WINDOW_MS && time <= measuredAt).length;
+        parts.push(`Image loads ${(recentLoads * 1000 / duration).toFixed(1)}/s (last ${Math.round(duration / 1000)}s; not distinct frames)`);
+      } else {
+        parts.push("Measuring image loads…");
+      }
+    }
     parts.push("Service activity does not confirm recognition is progressing.");
     const detail = parts.join(" • ");
     if (system.textContent !== detail) system.textContent = detail;
@@ -1861,10 +1930,10 @@ function renderHomeArrivals() {
         };
         const outcome = outcomes[command] || "Recorded decision";
         const tone = command === "uncertain" || command === "failed_before_activation" ? "bad" : "neutral";
-        card.innerHTML = `<summary><span class="decision-title">Latest check</span>
+        card.innerHTML = `<summary><span class="decision-summary"><span class="decision-title">Latest check</span>
           <span class="plate">${escapeHtml(event.plate || event.observed_plate || "Plate unreadable")}</span>
           <span class="live-badge status-${tone}">${escapeHtml(outcome)}</span>
-          <span id="home-decision-age" class="meta"></span></summary>
+          <span id="home-decision-age" class="meta"></span></span></summary>
           <div class="decision-note">${escapeHtml(describeDecision(event))}</div>`;
         state.decisionRenderedKey = key;
       }

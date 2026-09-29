@@ -1431,7 +1431,13 @@ def list_images():
 @app.route("/api/stream", methods=["GET"])
 def stream_info():
     stream_url = os.getenv("GATE_WEB_STREAM_URL", "").strip()
-    return jsonify({"url": stream_url})
+    data = {"url": stream_url}
+    if stream_url == "/static/stream.jpg" and os.getenv("GATE_WEB_STREAM_PROFILES", "0") == "1":
+        data["profiles"] = {
+            "tablet": "/static/stream-tablet.jpg",
+            "kiosk": "/static/stream-kiosk.jpg",
+        }
+    return jsonify(data)
 
 
 @app.route("/api/config", methods=["GET"])

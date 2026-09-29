@@ -36,6 +36,17 @@ def test_https_off_retains_http_and_does_not_require_certificate():
     assert "gate.example.com" in _render_nginx(False, "gate.example.com")
 
 
+@pytest.mark.parametrize("https_enabled", [False, True])
+def test_small_profiles_use_ram_and_fall_back_to_original_jpeg(https_enabled):
+    config = _render_nginx(https_enabled, "gate.example.com")
+    for profile in ("tablet", "kiosk"):
+        location = re.search(r"location = /static/stream-" + profile + r"\.jpg \{([^}]+)\}", config)
+        assert location
+        assert f"alias /run/gate-anpr/stream-{profile}.jpg;" in location[1]
+        assert "error_page 404 = /static/stream.jpg;" in location[1]
+        assert 'add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0";' in location[1]
+
+
 def test_https_on_rejects_unknown_hosts_and_preserves_http_proxy_origin():
     config = _render_nginx(True, "gate.example.com")
     assert "listen 443 ssl default_server;" in config

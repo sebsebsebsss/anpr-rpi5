@@ -82,3 +82,18 @@ def test_future_frame_time_is_clamped_after_clock_adjustment(stream_client):
     assert lag["lag_ms"] == 0
     assert health["stream_age_s"] == 0
     assert health["stream_stale"] is False
+
+
+def test_profile_urls_are_opt_in_and_do_not_replace_the_live_feed(stream_client, monkeypatch):
+    client, _, _ = stream_client
+    monkeypatch.setenv("GATE_WEB_STREAM_URL", "/static/stream.jpg")
+    monkeypatch.delenv("GATE_WEB_STREAM_PROFILES", raising=False)
+    assert client.get("/api/stream", headers=SECRET).get_json() == {"url": "/static/stream.jpg"}
+    monkeypatch.setenv("GATE_WEB_STREAM_PROFILES", "1")
+    result = client.get("/api/stream", headers=SECRET).get_json()
+    assert result == {
+        "url": "/static/stream.jpg",
+        "profiles": {"tablet": "/static/stream-tablet.jpg", "kiosk": "/static/stream-kiosk.jpg"},
+    }
+    monkeypatch.setenv("GATE_WEB_STREAM_URL", "https://camera.example/custom.jpg")
+    assert client.get("/api/stream", headers=SECRET).get_json() == {"url": "https://camera.example/custom.jpg"}

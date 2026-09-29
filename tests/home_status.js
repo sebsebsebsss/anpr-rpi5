@@ -43,6 +43,7 @@ function setup({ abortAvailable = true } = {}) {
   const document = {
     hidden: false, listeners: {},
     body: node("body"),
+    documentElement: { style: { setProperty(name, value) { this[name] = value; } } },
     getElementById: (id) => nodes[id] || null,
     querySelector: () => null,
     querySelectorAll(selector) {
@@ -97,16 +98,50 @@ function setup({ abortAvailable = true } = {}) {
       requests.push(request);
     });
   };
+  const window = { fetch, innerWidth: 1024, innerHeight: 748, listeners: {}, addEventListener: node("").addEventListener,
+    dispatch: node("").dispatch };
   const app = new Function("document", "window", "navigator", "fetch", "Date", "Image", "AbortController",
     "setTimeout", "clearTimeout", "history", source + `
       return { state, createLegacyStreamImage, renderHomeStatus, renderHomeArrivals, fetchHomeStatus,
         homeServerNow, describeDecision, pollVisibleTab, setActiveTab, saveAllowlist, markAllowlistChanged,
-        renderTabletTimeline, updateTabletTimelineRelativeTimes };
-    `)(document, { fetch }, { userAgent: "iPad; CPU OS 12_5_8 like Mac OS X" }, fetch, Clock, Image,
+        renderTabletTimeline, updateTabletTimelineRelativeTimes, initHomeViewport };
+    `)(document, window, { userAgent: "iPad; CPU OS 12_5_8 like Mac OS X" }, fetch, Clock, Image,
     abortAvailable ? AbortController : undefined, setTimeout, clearTimeout, { replaceState() {} });
   app.state.tabletLoaded = true;
   app.state.eventsLoaded = true;
-  return { app, nodes, fields, document, requests, timers, advance, images, now: () => now };
+  return { app, nodes, fields, document, window, requests, timers, advance, images, now: () => now };
+}
+
+function checkViewportSizing() {
+  const legacy = setup();
+  const height = () => legacy.document.documentElement.style["--home-viewport-height"];
+  legacy.app.initHomeViewport();
+  assert(height() === "748px", "iOS 12 must use innerHeight when visualViewport is absent");
+  legacy.window.innerHeight = 704;
+  legacy.window.dispatch("resize");
+  assert(height() === "704px", "Safari's visible address bar must shrink the wall layout");
+  legacy.window.innerHeight = 680;
+  legacy.window.dispatch("orientationchange");
+  assert(height() === "680px", "Orientation changes must measure the available height again");
+  legacy.window.innerHeight = 748;
+  legacy.window.dispatch("pageshow");
+  assert(height() === "748px", "Returning from Safari's page cache must refresh the height");
+  legacy.window.innerHeight = 0;
+  legacy.window.dispatch("resize");
+  assert(height() === "748px", "Transient invalid measurements must not collapse the gate control");
+  const modern = setup();
+  const visual = { height: 703.7, scale: 1, addEventListener(name, callback) { this[name] = callback; } };
+  modern.window.visualViewport = visual;
+  modern.app.initHomeViewport();
+  const modernHeight = () => modern.document.documentElement.style["--home-viewport-height"];
+  assert(modernHeight() === "703px", "Visible viewport height must account for modern browser chrome");
+  visual.height = 900;
+  visual.resize();
+  assert(modernHeight() === "748px", "Visual viewport must not enlarge beyond innerHeight");
+  visual.height = 350;
+  visual.scale = 2;
+  visual.resize();
+  assert(modernHeight() === "748px", "Pinch zoom must not trigger a smaller wall layout");
 }
 
 async function settle() { for (let index = 0; index < 10; index++) await Promise.resolve(); }
@@ -167,6 +202,44 @@ function checkFrameTruth() {
   applySnapshot(test, snapshot({ services_checked_at: 1899999900 }));
   test.app.renderHomeStatus();
   assert(test.nodes["tablet-system-status"].textContent.includes("Service status unavailable"), "An old active-service snapshot cannot be reported as current");
+}
+
+function checkDisplayDiagnostics() {
+  const test = setup();
+  const image = test.app.createLegacyStreamImage("/static/stream.jpg");
+  image.naturalWidth = 800;
+  image.naturalHeight = 450;
+  test.app.state.homeFrame = image.gateFrameState;
+  applySnapshot(test);
+  const detail = () => test.nodes["tablet-system-status"].textContent;
+  image.onload();
+  test.app.renderHomeStatus();
+  assert(detail().includes("Viewport 1024×748 CSS px"), "On-device details must report CSS viewport dimensions");
+  assert(detail().includes("JPEG 800×450"), "Report the loaded image's real dimensions");
+  assert(detail().includes("Measuring image loads"), "Do not invent a rate before the first sampling interval");
+  for (let index = 0; index < 25; index++) {
+    test.advance(200);
+    image.onload();
+  }
+  test.app.renderHomeStatus();
+  assert(detail().includes("Image loads 5.0/s (last 5s; not distinct frames)"), "Load count must be labelled separately from distinct camera frames");
+  assert(image.gateFrameState.loadTimes.length === 25, "Only recent completed loads should remain in memory");
+  test.window.innerHeight = 704;
+  test.app.renderHomeStatus();
+  assert(detail().includes("Viewport 1024×704 CSS px"), "Diagnostics must reflect Safari's reduced visible height");
+  test.advance(200);
+  image.onerror();
+  const count = image.gateFrameState.loadTimes.length;
+  test.advance(5200);
+  test.app.renderHomeStatus();
+  assert(detail().includes("Image loads 0.0/s"), "Recent load rate must fall to zero when no new image loads");
+  assert(image.gateFrameState.loadTimes.length === count, "Rendering diagnostics must not mutate the on-load sample buffer");
+  image.naturalWidth = 640;
+  image.naturalHeight = 360;
+  image.onload();
+  test.app.renderHomeStatus();
+  assert(detail().includes("JPEG 640×360"), "A new image profile must update displayed JPEG dimensions");
+  assert(image.gateFrameState.loadTimes.length === 1, "A resumed load must discard old samples");
 }
 
 function checkArrivalExpiryAndDecisions() {
@@ -317,7 +390,9 @@ async function checkPlateDeadlines() {
 }
 
 async function run() {
+  checkViewportSizing();
   checkFrameTruth();
+  checkDisplayDiagnostics();
   checkArrivalExpiryAndDecisions();
   await checkHomePolling();
   await checkPlateFeedback();
