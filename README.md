@@ -1,308 +1,102 @@
 # gatepi-anpr
 
-Raspberry Pi 5 gate automation with ANPR and a LAN-first web UI.
-
-This project turns a Pi into a practical gate controller that reads an RTSP camera,
-recognises number plates, opens for allowlisted vehicles, and keeps an auditable
-history with images and timings.
+Raspberry Pi 5 gate automation with number plate recognition and a local web UI.
+An RTSP camera supplies the images; OpenALPR recognises plates and a GPIO relay
+triggers your existing gate controller for allowlisted vehicles.
 
 ![Gatepi ANPR UI](docs/UI.png)
 
-## Who this is for
-- Home or small-site setups with a physical gate controller already in place.
-- You want automatic opening for trusted vehicles, plus manual override and logs.
-- You prefer local/LAN operation over cloud dependence.
+## Features
 
-## Highlights
-- One-command provisioning on Raspberry Pi 5 (Debian Trixie target).
-- OpenALPR daemon + gate worker + web UI + RTSP stream pipeline.
-- Tablet-friendly interface for live view, events, allowlist edits, and control.
-- Built-in housekeeping: old captures, logs, and event DB retention.
+- Automatic opening for trusted vehicles, manual control and editable allowlist.
+- Live camera, recent arrivals, filtered history, activity statistics and logs.
+- Large touch controls and single-screen layouts for a wall iPad and Pi touchscreen.
+- JPEG previews in RAM, optional smaller images for older screens, and recovery
+  from interrupted camera connections.
+- Configuration backups and automatic cleanup of old captures and history.
 
-## Architecture
-- `alprd`: OpenALPR daemon
-- `gate_anpr`: queue consumer + GPIO relay trigger logic
-- `gate_anpr_web`: Flask web app
-- `gate_anpr_stream_jpeg`: RTSP -> JPEG stream for UI
+Everything works over ordinary LAN HTTP. Trusted HTTPS with automatic renewal is
+optional and disabled by default; no domain or DNS account is needed for HTTP.
+This is a local gate accessory, intended to use your existing gate controller.
 
-## Physical setup (high level)
-```mermaid
-flowchart LR
-  Controller["Controller machine<br/>(Ansible + browser)"]
-  Camera["IP camera<br/>(RTSP stream)"]
-  Pi["Raspberry Pi 5<br/>(alprd + gate_anpr + web UI)"]
-  Relay["Relay board"]
-  GateCtrl["Gate controller"]
-  Gate["Gate motor"]
+## Requirements
 
-  Controller <-->|SSH deploy + HTTP UI| Pi
-  Camera -->|RTSP video| Pi
-  Pi -->|GPIO trigger| Relay
-  Relay -->|momentary contact| GateCtrl
-  GateCtrl -->|open/close control| Gate
-```
+- Raspberry Pi 5 running Raspberry Pi OS Lite 64-bit / Debian Trixie.
+- Relay board connected to the gate controller's momentary trigger input.
+- IP camera with a stable RTSP stream and a clear view of number plates.
+- Ansible on your computer, SSH/sudo access to the Pi and internet access during
+  initial provisioning.
 
-## Hardware requirements
-- Raspberry Pi 5 (8GB proven, 4GB likely to work)
-- Relay board wired to your existing gate/garage controller
-- IP camera with a stable RTSP stream. A clear, close plate view matters more than
-  the exact model; the tested setup used an Annke CZ804 with manual shutter speed,
-  night-time IR, and optical/mechanical zoom.
-
-## Hardware wiring
-
-```
-Pi GPIO (physical BOARD pin 23 / BCM pin 11)
-  → Relay board IN signal (active-HIGH: Pi HIGH closes relay contact)
-Relay COM → Gate controller trigger terminal
-Relay NO  → Gate controller trigger terminal (normally-open contact)
-```
-
-Relay polarity: the code pulses the GPIO **HIGH for 500 ms** then returns it **LOW**. With a standard active-HIGH relay board this closes the normally-open contact for 500 ms — a momentary trigger the gate controller treats as a "open" command. If your relay is active-LOW, change `RELAY_ON = 1` and `RELAY_OFF = 0` in `files/gate_runtime.py` to `0` and `1` respectively.
-
-Default GPIO pins (overridable via env):
-
-| Env var | Default | Notes |
-|---|---|---|
-| `GATE_PIN_BOARD` | 23 | Physical BOARD numbering used by RPi.GPIO |
-| `GATE_PIN_BCM` | 11 | BCM numbering used by lgpio fallback |
-
-BOARD pin 23 = BCM pin 11 on Raspberry Pi 4/5.
-
-## Software requirements
-- Ansible installed on your controller machine
-- SSH access to the Pi
-- Pi reachable on your LAN
-- Outbound internet access on first provision for `apt` packages and, if needed, an OpenALPR source clone
-
-## Fresh Pi prep
-Before running Ansible, start from a Pi that you can already administer:
-
-- Install Raspberry Pi OS Lite 64-bit based on Debian Trixie.
-- Enable SSH and give the Pi a fixed DHCP lease or otherwise known LAN IP.
-- Confirm you can SSH from the controller machine: `ssh pi@<pi-ip>`.
-- Confirm the SSH user can use `sudo`; put that password in `ansible.env`.
-- Confirm your camera RTSP URL works from the LAN, for example with VLC or `ffmpeg`.
-
-## Configure secrets
-App settings live in a local file (gitignored):
-
-```sh
-cp files/gate_anpr.env.example files/gate_anpr.env
-```
-
-Only commit the `.example` files. The real env, inventory, and allowlist files are
-ignored by git.
-
-Required values in `files/gate_anpr.env`:
-
-```ini
-GATE_ANPR_DEBUG=0
-PLATE_ALLOWLIST_PATH=/opt/gate_anpr/allowlist.json
-GATE_PIN_BOARD=23
-GATE_PIN_BCM=11
-```
-
-`GATE_API_SHARED_SECRET` is auto-generated by the deploy playbook on first
-run and persisted in `/etc/gate_anpr.env` on the Pi — you do not need to set
-it. To pin a specific value, add it to `files/gate_anpr.env` before deploying.
-
-Optional values:
-
-```ini
-PUSHOVER_USER_KEY=...
-PUSHOVER_APP_TOKEN=...
-MATCH_DEDUP_SECONDS=60
-FUZZY_ALLOWLIST=1
-FUZZY_MAX_DISTANCE=1
-FUZZY_MIN_CONFIDENCE=75
-# Optional: override stale manual-open rejection window. Defaults to 15s.
-# GATE_WEB_MANUAL_OPEN_MAX_AGE_SECONDS=15
-GATE_WEB_STREAM_URL=/static/stream.jpg
-# Optional: use a different stream for the web preview. Defaults to ALPRD_STREAM.
-# GATE_WEB_STREAM_RTSP_URL=rtsp://user:pass@camera-ip:554/h264Preview_01_sub
-GATE_WEB_STREAM_FPS=12.5
-GATE_WEB_STREAM_WIDTH=1280
-GATE_WEB_STREAM_HEIGHT=720
-# If you change the nginx listen port, set this to the same public port for
-# Ansible smoke checks.
-# GATE_WEB_PORT=80
-# Extra origins allowed to call mutating API endpoints, on top of the
-# automatic same-origin check (only needed for unusual proxy setups)
-GATE_ALLOWED_ORIGINS=
-# Override lat/lon for sunrise/sunset calculations (falls back to system timezone centroid)
-GATE_UI_LAT=54.0
-GATE_UI_LON=-2.0
-```
-
-If `PUSHOVER_USER_KEY` and `PUSHOVER_APP_TOKEN` are omitted, deploy still works; notifications are just disabled.
-
-Create your local allowlist file:
-
-```sh
-cp files/plate_allowlist.json.example files/plate_allowlist.json
-```
-
-Example:
-
-```json
-[
-  ["A1ABC", "Test Car"]
-]
-```
-
-## Controller env
-Controller-side runtime vars (gitignored):
-
-```sh
-cp ansible.env.example ansible.env
-```
-
-Fill in:
-
-```ini
-GATEPI_USER=pi
-ANSIBLE_BECOME_PASSWORD=...
-ALPRD_STREAM=rtsp://user:pass@camera-ip:554/h264Preview_01_main
-```
-
-Useful optional values from `ansible.env.example`:
-
-```ini
-ALPRD_CPU_AFFINITY=
-ALPRD_ROI=1,208,2092,888
-GATEPI_ALIAS_HOSTNAME=gate
-OPENALPR_SHA=HEAD
-```
-
-`ALPRD_STREAM` is the stream OpenALPR reads for recognition. If you want the UI
-to use a lower-resolution stream, set `GATE_WEB_STREAM_RTSP_URL` in
-`files/gate_anpr.env`; otherwise the UI stream reuses `ALPRD_STREAM`.
-
-For repeatable OpenALPR source builds, replace `OPENALPR_SHA=HEAD` with a
-specific commit SHA.
-
-## Inventory
-`site.yml` targets host group `gatepi`.
-
-Create inventory:
-
-```sh
-cp inventory.ini.example inventory.ini
-```
-
-Edit `inventory.ini` and replace `192.168.x.x` with the Pi's LAN IP:
-
-```ini
-[gatepi]
-192.168.x.x
-```
-
-If you want custom host groups, map them under `gatepi` using children.
+The tested installation uses an 8GB Pi 5. Camera placement, shutter speed and
+night-time illumination matter more to recognition than the camera model.
+See [setup and wiring](docs/SETUP.md) before connecting the relay.
 
 ## Quickstart
 
-Load controller env before running any `ansible-playbook` command in this README:
+Start with an accessible Pi and a working camera RTSP URL. For a new installation,
+copy the example files; `-n` preserves any existing local configuration:
+
+```sh
+cp -n ansible.env.example ansible.env
+cp -n inventory.ini.example inventory.ini
+cp -n files/gate_anpr.env.example files/gate_anpr.env
+cp -n files/plate_allowlist.json.example files/plate_allowlist.json
+```
+
+Edit the copies:
+
+| File | Set |
+|---|---|
+| `inventory.ini` | Pi's LAN address in the `gatepi` group |
+| `ansible.env` | SSH user, sudo password and `ALPRD_STREAM` camera URL |
+| `files/gate_anpr.env` | GPIO/preview settings; remove Pushover placeholders if unused |
+| `files/plate_allowlist.json` | Allowed plates and display names |
+
+Keep these local files private; they are ignored by Git. The API secret is
+created automatically on the Pi. Detailed options are in the
+[setup guide](docs/SETUP.md).
+
+From the repository root, load the controller settings and deploy:
 
 ```sh
 set -a
 source ansible.env
 set +a
-ANSIBLE_BECOME_PASSWORD="$ANSIBLE_BECOME_PASSWORD" ansible-playbook -i inventory.ini site.yml -e ansible_user="$GATEPI_USER"
+export ANSIBLE_BECOME_PASS="$ANSIBLE_BECOME_PASSWORD"
+ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml
 ```
 
-Expected first run behavior:
-- Can take a long time on a fresh Pi (source build path)
-- Needs outbound package/source downloads during provisioning
-- Ends with services enabled and started
+The first run may take a while to build OpenALPR. Subsequent deployments preserve
+the Pi's environment file; see [updating configuration](docs/OPERATIONS.md#configuration)
+for deliberate replacements and preview-only tuning.
 
-## Fast reruns
+## Screens
 
-```sh
-set -a
-source ansible.env
-set +a
+| URL | Use |
+|---|---|
+| `http://<pi-ip>/` | Home, optimised for a landscape wall iPad |
+| `http://<pi-ip>/fullscreen` | Dedicated Pi touchscreen with no navigation |
+| `http://<pi-ip>/#stream` | Larger live camera view |
 
-# Web UI only
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site.yml --tags web
+The two wall layouts prioritise an uncropped camera and a large gate button,
+without scrolling. Phone styling adapts separately. The Home FPS pill measures
+completed image loads; its details distinguish a stalled display from a stale
+camera preview. An active service or successful relay command does not confirm
+recognition progress or physical gate position.
 
-# App/services only
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site.yml --tags deploy
+## Documentation
 
-# Provisioning/build only
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site.yml --tags provision
-```
+- [Setup](docs/SETUP.md): wiring, camera and local configuration.
+- [Operations](docs/OPERATIONS.md): deployments, backups, logs and diagnostics.
+- [Optional HTTPS](docs/HTTPS.md): trusted certificates, DuckDNS validation and renewal.
+- [Performance](docs/PERFORMANCE.md): JPEG profiles, camera resolution and detection masks.
+- [Development](CONTRIBUTING.md): tests, safe local UI preview and contribution checks.
 
-## Optional test workflows
-Tests are split from the main deployment playbook.
-Load `ansible.env` first as above.
+## Future ideas
 
-OpenALPR smoketest, using a local image that contains a readable plate. Real
-plate images are not committed to this repo for privacy:
+- Move beyond legacy OpenALPR towards more efficient recognition and hardware offload.
+- Improve restart/outage recovery and monitoring of actual recognition progress.
+- Add useful household controls such as a timed automatic-opening pause or guest access.
 
-```sh
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_openalpr_smoketest=true -e openalpr_test_image_path="tests/test.jpeg"
-```
-
-Synthetic queue job:
-
-```sh
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_synthetic_job=true
-```
-
-With overrides:
-
-```sh
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_synthetic_job=true -e synthetic_plate=A1ABC -e synthetic_delay=60
-```
-
-## Web UI
-Default URL:
-
-```text
-http://<pi-ip>/
-```
-
-The UI is served by nginx on port 80, proxying to the Flask app (waitress)
-on 127.0.0.1:8080. To change the public port, edit both `listen` directives in
-`files/nginx/gate-anpr.conf` (the catch-all reject block and the site block),
-set `GATE_WEB_PORT` to the same public port for the Ansible smoke checks, and
-redeploy.
-
-nginx only answers requests whose `Host` header is a known name for the Pi
-(its hostname, avahi alias, LAN IP, or localhost); anything else is dropped
-with no response. This blocks DNS-rebinding attacks against the API. If you
-reach the UI via an extra hostname (e.g. a reverse proxy), add it to the
-`server_name` list in `files/nginx/gate-anpr.conf`.
-
-## Stream settings
-In `/etc/gate_anpr.env` (or local `files/gate_anpr.env` then redeploy):
-
-```ini
-GATE_WEB_STREAM_URL=/static/stream.jpg
-GATE_WEB_STREAM_RTSP_URL=rtsp://user:pass@camera-ip:554/h264Preview_01_main
-GATE_WEB_STREAM_FPS=12.5
-GATE_WEB_STREAM_WIDTH=1280
-GATE_WEB_STREAM_HEIGHT=720
-```
-
-## Logs
-
-```sh
-journalctl -u gate_anpr -f
-```
-
-```sh
-journalctl -u alprd -f
-journalctl -u gate_anpr_web -f
-journalctl -u gate_anpr_stream_jpeg -f
-```
-
-```sh
-tail -n100 /var/log/gate-anpr/gate-anpr.log
-```
-
-## Known tradeoffs
-- OpenALPR is effective but CPU-heavy on high frame rates.
-- Recognition quality depends heavily on camera placement, exposure, and plate legibility.
-- This stack is LAN-first and not designed as an internet-exposed service.
+These are possible next steps, not requirements for a working installation.
+Track specific agreed work in GitHub issues; completed changes belong in Git history.

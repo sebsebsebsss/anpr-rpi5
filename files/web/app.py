@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import base64
 import fcntl
+import hashlib
 import hmac
 import json
 import math
@@ -9,12 +11,16 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from html import escape
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -22,14 +28,19 @@ ROOT_DIR = os.path.dirname(APP_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from allowlist_util import normalise_plate  # noqa: E402
+from allowlist_util import group_allowlist, normalise_plate, validate_allowlist  # noqa: E402
 from gate_runtime import (  # noqa: E402
+    RECENT_DECISION_GLOBAL_SAMPLE_SECONDS,
+    RECENT_DECISION_SAMPLE_SECONDS,
+    RECENT_DECISIONS_LIMIT,
+    GateActuationError,
     configure_logging,
     env_int,
     init_events_db,
     insert_event,
     now_local_str,
     parse_local_timestamp,
+    read_recent_decisions,
     sqlite_healthcheck,
 )
 from gate_runtime import open_gate as trigger_gate  # noqa: E402
@@ -37,6 +48,12 @@ from gate_runtime import open_gate as trigger_gate  # noqa: E402
 ALLOWLIST_PATH = os.getenv("PLATE_ALLOWLIST_PATH", "/opt/gate_anpr/allowlist.json")
 LOG_PATH = "/var/log/gate-anpr/gate_anpr_web.log"
 PLATES_DIR = "/home/pi/plates"
+STREAM_JPEG_PATH = os.getenv("GATE_WEB_STREAM_JPEG", "/run/gate-anpr/stream.jpg")
+STREAM_STALE_SECONDS = env_int("GATE_WEB_STREAM_STALE_SECONDS", 15, "gate_anpr_web")
+PREVIEW_LOCK = threading.Lock()
+HOME_SERVICE_LOCK = threading.Lock()
+HOME_SERVICE_CACHE = {"checked_monotonic": None, "checked_at": None, "services": {}}
+UNFAMILIAR_MAX_AGE_SECONDS = 300
 GATE_PIN_BOARD = env_int("GATE_PIN_BOARD", 23, "gate_anpr_web")
 GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
@@ -225,7 +242,7 @@ LOG_RANGE_MAP = {
 
 @app.after_request
 def add_cache_headers(response):
-    if request.path.startswith("/images/"):
+    if request.path.startswith(("/images/", "/previews/")) and response.status_code == 200:
         # Plate JPEGs are content-addressed by timestamp — they never change.
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
@@ -247,6 +264,28 @@ def require_api_secret():
     return jsonify({"error": "forbidden"}), 401
 
 
+def _origin_tuple(value):
+    """Normalize an HTTP origin, including its scheme and effective port."""
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+        return parsed.scheme, parsed.hostname.lower(), port
+    except ValueError:
+        return None
+
+
 def _check_csrf():
     """Same-origin check on Origin (falling back to Referer) for mutating endpoints.
 
@@ -254,10 +293,10 @@ def _check_csrf():
     spoof it. A cross-site form submission from evil.com carries
     Origin: https://evil.com and is rejected here.
 
-    The primary rule is same-origin: the Origin host must match the Host header
-    of this request — this works regardless of which hostname, avahi alias, or
-    raw IP the client used to reach the UI. GATE_ALLOWED_ORIGINS adds explicit
-    extra origins (e.g. a reverse proxy on another name) on top of that.
+    Scheme, hostname and effective port must all match. nginx preserves Host
+    and overwrites X-Forwarded-Proto; Waitress trusts that header only from the
+    loopback proxy, so request.scheme describes the client's HTTP/TLS origin.
+    GATE_ALLOWED_ORIGINS adds explicit exceptions on top of this rule.
     """
     from urllib.parse import urlparse
 
@@ -265,23 +304,25 @@ def _check_csrf():
     if not origin:
         ref = request.headers.get("Referer", "").strip()
         if ref:
-            parsed = urlparse(ref)
-            origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            try:
+                parsed = urlparse(ref)
+                origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            except ValueError:
+                origin = ""
     if not origin:
         log.warning("CSRF check failed: no Origin or Referer header on %s %s", request.method, request.path)
         return jsonify({"error": "forbidden"}), 403
 
-    origin_host = urlparse(origin).netloc.lower()
-    request_host = request.host.lower()
-    # Same-origin: host (incl. port) matches however the client addressed us.
-    if origin_host and (origin_host == request_host or origin_host == request_host.split(":")[0]):
+    request_origin = request.host_url.rstrip("/")
+    normalized_origin = _origin_tuple(origin)
+    if normalized_origin is not None and normalized_origin == _origin_tuple(request_origin):
         return None
     if origin in ALLOWED_ORIGINS:
         return None
     log.warning(
-        "CSRF check failed: origin %r does not match host %r and is not in allowlist on %s %s",
+        "CSRF check failed: origin %r does not match request origin %r and is not in allowlist on %s %s",
         origin,
-        request_host,
+        request_origin,
         request.method,
         request.path,
     )
@@ -306,8 +347,8 @@ def _parse_detail(value):
         return value
 
 
-def _query_events(kinds=None, offset=0, limit=60, since=None):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+def _query_events(kinds=None, offset=0, limit=60, since=None, until=None):
+    conn = sqlite3.connect(Path(EVENTS_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
     conn.row_factory = sqlite3.Row
     try:
         clauses = []
@@ -318,44 +359,48 @@ def _query_events(kinds=None, offset=0, limit=60, since=None):
         if since:
             clauses.append("captured_at >= ?")
             params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
+        if until:
+            clauses.append("captured_at <= ?")
+            params.append(until.strftime("%Y-%m-%d %H:%M:%S"))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = conn.execute(
             f"""
             SELECT * FROM events
             {where}
-            ORDER BY captured_at DESC
+            ORDER BY captured_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (*params, limit, offset),
         ).fetchall()
-        results = []
-        for row in rows:
-            image_name = row["image_name"] or ""
-            results.append(
-                {
-                    "id": row["id"],
-                    "uuid": row["uuid"],
-                    "plate": _display_plate(row["plate"]),
-                    "owner": row["owner"],
-                    "allowed": bool(row["allowed"]),
-                    "confidence": row["confidence"],
-                    "kind": row["kind"],
-                    "captured_at": row["captured_at"],
-                    "source": row["source"],
-                    "processing_time_ms": row["processing_time_ms"],
-                    "observed_plate": row["observed_plate"],
-                    "observed_confidence": row["observed_confidence"],
-                    "fuzzy_distance": row["fuzzy_distance"],
-                    "fuzzy": bool(row["fuzzy"]) if row["fuzzy"] is not None else False,
-                    "request_ip": row["request_ip"],
-                    "detail": _parse_detail(row["detail"]),
-                    "image_name": image_name,
-                    "image_url": f"/images/{image_name}" if image_name else "",
-                }
-            )
-        return results
+        return [_event_payload(row) for row in rows]
     finally:
         conn.close()
+
+
+def _event_payload(row):
+    image_name = row["image_name"] or ""
+    return {
+        "id": row["id"],
+        "uuid": row["uuid"],
+        "plate": _display_plate(row["plate"]),
+        "owner": row["owner"],
+        "allowed": bool(row["allowed"]),
+        "confidence": row["confidence"],
+        "kind": row["kind"],
+        "captured_at": row["captured_at"],
+        "source": row["source"],
+        "processing_time_ms": row["processing_time_ms"],
+        "observed_plate": row["observed_plate"],
+        "observed_confidence": row["observed_confidence"],
+        "fuzzy_distance": row["fuzzy_distance"],
+        "fuzzy": bool(row["fuzzy"]) if row["fuzzy"] is not None else False,
+        "request_ip": row["request_ip"],
+        "detail": _parse_detail(row["detail"]),
+        "image_name": image_name,
+        "image_url": f"/images/{image_name}" if image_name else "",
+        "preview_url": f"/previews/{image_name}?size=640" if image_name else "",
+        "thumbnail_url": f"/previews/{image_name}?size=160" if image_name else "",
+    }
 
 
 init_events_db(EVENTS_DB_PATH)
@@ -370,7 +415,7 @@ def _read_allowlist():
 
 # Cache the normalised-key -> registered-plate map, rebuilt when the allowlist
 # file changes. Recognition matches on the normalised (OCR-confusable-folded)
-# key, so a plate registered as "S3BPN" is stored/grouped as "538PN". For
+# key, so a plate registered as "SB12XYZ" is stored/grouped as "5812XY2". For
 # display we always resolve back to the plate exactly as entered in admin;
 # the recorded value is never trusted, since what the camera saw may be wrong.
 _display_cache = {"mtime": None, "map": {}}
@@ -531,11 +576,24 @@ def _gate_run_with_cooldown(action):
         now = time.time()
         remaining = max(0, int(GATE_COOLDOWN_SECONDS - (now - last_ts)))
         if remaining == 0:
-            action()
-            handle.seek(0)
-            handle.truncate()
-            handle.write(f"{now:.3f}\n")
-            handle.flush()
+
+            def save_cooldown():
+                handle.seek(0)
+                handle.truncate()
+                handle.write(f"{now:.3f}\n")
+                handle.flush()
+
+            try:
+                pulsed = action()
+            except GateActuationError as exc:
+                if exc.may_have_activated:
+                    save_cooldown()
+                raise
+            save_cooldown()
+            if pulsed is False:
+                # ANPR or another process just opened it. Do not record a
+                # second manual opening for a pulse that did not happen.
+                remaining = GATE_COOLDOWN_SECONDS
         fcntl.flock(handle, fcntl.LOCK_UN)
     return remaining
 
@@ -706,21 +764,7 @@ def _maintenance_health():
 
 @app.route("/api/plates", methods=["GET"])
 def get_plates():
-    raw = _read_allowlist()
-    grouped = []
-    if not raw:
-        return jsonify([])
-    if isinstance(raw, list) and raw and isinstance(raw[0], (list, tuple)):
-        owners = {}
-        for plate, owner in raw:
-            owners.setdefault(owner, []).append(plate)
-        for owner, plates in owners.items():
-            grouped.append({"owner": owner, "plates": sorted(set(plates))})
-    elif isinstance(raw, list) and raw and isinstance(raw[0], dict) and "plates" in raw[0]:
-        grouped = raw
-    else:
-        grouped = raw
-    return jsonify(grouped)
+    return jsonify(group_allowlist(_read_allowlist()))
 
 
 @app.route("/api/plates", methods=["PUT"])
@@ -728,50 +772,17 @@ def put_plates():
     err = _check_csrf()
     if err:
         return err
-    data = request.get_json(force=True)
-    if not isinstance(data, list):
-        return jsonify({"error": "expected list"}), 400
-    cleaned = []
-    for item in data:
-        if isinstance(item, dict) and "owner" in item and "plates" in item:
-            owner = str(item["owner"]).strip()
-            plates = item.get("plates") or []
-            if isinstance(plates, str):
-                plates = [plates]
-            norm = [str(p).upper().strip() for p in plates if str(p).strip()]
-            if not owner:
-                return jsonify({"error": "owner required"}), 400
-            if not norm:
-                return jsonify({"error": f"no plates for owner {owner}"}), 400
-            cleaned.append({"owner": owner, "plates": sorted(set(norm))})
-        elif isinstance(item, (list, tuple)) and len(item) == 2:
-            plate = str(item[0]).upper().strip()
-            owner = str(item[1]).strip()
-            cleaned.append({"owner": owner, "plates": [plate]})
-        elif isinstance(item, dict) and "plate" in item and "owner" in item:
-            plate = str(item["plate"]).upper().strip()
-            owner = str(item["owner"]).strip()
-            cleaned.append({"owner": owner, "plates": [plate]})
-        else:
-            return jsonify({"error": f"invalid entry: {item!r}"}), 400
+    try:
+        cleaned = validate_allowlist(request.get_json(force=True))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     _write_allowlist(cleaned)
     return jsonify({"ok": True, "count": len(cleaned)})
 
 
 @app.route("/api/allowlist-status", methods=["GET"])
 def get_allowlist_status():
-    allowlist = _read_allowlist()
-    grouped = []
-    if isinstance(allowlist, list) and allowlist and isinstance(allowlist[0], (list, tuple)):
-        owners = {}
-        for plate, owner in allowlist:
-            owners.setdefault(owner, []).append(plate)
-        for owner, plates in owners.items():
-            grouped.append({"owner": owner, "plates": sorted(set(plates))})
-    elif isinstance(allowlist, list) and allowlist and isinstance(allowlist[0], dict):
-        grouped = allowlist
-    else:
-        grouped = []
+    grouped = group_allowlist(_read_allowlist())
     conn = sqlite3.connect(EVENTS_DB_PATH)
     try:
         rows = conn.execute(
@@ -824,7 +835,18 @@ def open_gate():
     err = _check_manual_open_freshness(request_ip)
     if err:
         return err
-    remaining = _gate_run_with_cooldown(lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log))
+    try:
+        remaining = _gate_run_with_cooldown(lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log))
+    except GateActuationError as exc:
+        log.error("Manual gate request failed (activation attempted=%s)", exc.may_have_activated)
+        return jsonify(
+            {
+                "ok": False,
+                "error": "gate_open_failed",
+                "may_have_activated": exc.may_have_activated,
+                "retry_in": GATE_COOLDOWN_SECONDS if exc.may_have_activated else 0,
+            }
+        ), 503
     if remaining > 0:
         return jsonify({"ok": False, "retry_in": remaining}), 429
     insert_event(
@@ -888,6 +910,87 @@ def get_events():
     return jsonify(events)
 
 
+def _history_cursor(captured_at, event_id, snapshot, since):
+    data = json.dumps([captured_at, event_id, snapshot, since], separators=(",", ":"))
+    return base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
+
+
+@app.route("/api/history", methods=["GET"])
+def get_history():
+    """Bounded, stable pages: new captures cannot shift an in-progress browse."""
+    limit = _int_arg("limit", 30, 1, 60)
+    window = request.args.get("window", "30d")
+    kinds = set(request.args.get("kind", "recognised,unmatched").split(","))
+    if window not in {"24h", "7d", "30d", "all"} or not kinds or not kinds <= {"recognised", "unmatched"}:
+        return jsonify({"error": "invalid history filters"}), 400
+    since_date = _window_bounds(window)
+    since = since_date.strftime("%Y-%m-%d %H:%M:%S") if since_date else None
+    cursor = request.args.get("cursor", "")
+    anchor = None
+    snapshot = None
+    if cursor:
+        try:
+            if len(cursor) > 512:
+                raise ValueError()
+            captured, event_id, snapshot, since = json.loads(
+                base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            )
+            if not isinstance(captured, str) or parse_local_timestamp(captured) is None:
+                raise ValueError()
+            if type(event_id) is not int or type(snapshot) is not int or not (1 <= event_id <= snapshot <= 2**63 - 1):
+                raise ValueError()
+            if since is not None and (not isinstance(since, str) or parse_local_timestamp(since) is None):
+                raise ValueError()
+            anchor = (captured, event_id)
+        except (ValueError, TypeError, UnicodeError):
+            return jsonify({"error": "invalid history cursor"}), 400
+    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        if snapshot is None:
+            snapshot = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+        clauses = ["id <= ?"]
+        params = [snapshot]
+        kind_clauses = []
+        if "recognised" in kinds:
+            kind_clauses.append(
+                "(kind = 'recognised' OR (kind IN ('unmatched', 'candidate') AND COALESCE(owner, '') != ''))"
+            )
+        if "unmatched" in kinds:
+            kind_clauses.append("(kind IN ('unmatched', 'candidate') AND COALESCE(owner, '') = '')")
+        clauses.append("(" + " OR ".join(kind_clauses) + ")")
+        if since:
+            clauses.append("captured_at >= ?")
+            params.append(since)
+        if anchor:
+            clauses.append("(captured_at, id) < (?, ?)")
+            params.extend(anchor)
+        elif request.args.get("start_id"):
+            try:
+                start_id = int(request.args["start_id"])
+                if not 1 <= start_id <= 2**63 - 1:
+                    raise ValueError()
+            except ValueError:
+                return jsonify({"error": "invalid event id"}), 400
+            target = conn.execute("SELECT captured_at, id FROM events WHERE id = ?", (start_id,)).fetchone()
+            if target is None:
+                return jsonify({"error": "capture no longer available"}), 404
+            clauses.append("(captured_at, id) <= (?, ?)")
+            params.extend(target)
+        rows = conn.execute(
+            f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY captured_at DESC, id DESC LIMIT ?",
+            (*params, limit + 1),
+        ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = _history_cursor(rows[-1]["captured_at"], rows[-1]["id"], snapshot, since) if has_more else None
+        return jsonify(
+            {"items": [_event_payload(row) for row in rows], "next_cursor": next_cursor, "has_more": has_more}
+        )
+    finally:
+        conn.close()
+
+
 @app.route("/api/timeline", methods=["GET"])
 def get_timeline():
     per_page = _int_arg("per_page", 25, 5, 100)
@@ -941,30 +1044,40 @@ def _window_bounds(window):
     return None
 
 
+def _stats_connection():
+    return sqlite3.connect(Path(EVENTS_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+
+
+def _stats_kind_expression():
+    # Match /api/history: older rows may have an owner without a recognised kind.
+    return """CASE
+        WHEN kind IN ('unmatched', 'candidate') AND COALESCE(owner, '') != '' THEN 'recognised'
+        WHEN kind = 'candidate' THEN 'unmatched'
+        ELSE kind END"""
+
+
+def _stats_kind_filter(kinds):
+    # Keep the old candidate argument as an alias for the unfamiliar category.
+    canonical = list(dict.fromkeys("unmatched" if kind == "candidate" else kind for kind in kinds))
+    placeholders = ",".join("?" for _ in canonical)
+    return f"({_stats_kind_expression()}) IN ({placeholders})", canonical
+
+
 def _stats_counts(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        if window:
-            return conn.execute(
-                """
-                SELECT kind, COUNT(*) FROM events
-                WHERE captured_at >= ?
-                GROUP BY kind
-                """,
-                (window.strftime("%Y-%m-%d %H:%M:%S"),),
-            ).fetchall()
+        where = " WHERE captured_at >= ?" if window else ""
+        params = (window.strftime("%Y-%m-%d %H:%M:%S"),) if window else ()
         return conn.execute(
-            """
-            SELECT kind, COUNT(*) FROM events
-            GROUP BY kind
-            """
+            f"SELECT {_stats_kind_expression()} AS category, COUNT(*) FROM events{where} GROUP BY category",
+            params,
         ).fetchall()
     finally:
         conn.close()
 
 
 def _stats_timeseries(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         if window and window >= datetime.now() - timedelta(days=2):
             rows = conn.execute(
@@ -1004,22 +1117,24 @@ def _stats_timeseries(window):
 
 
 def _stats_top_plate(window, kind):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["1=1"]
         params = []
         if kind:
-            where.append("kind = ?")
-            params.append(kind)
+            clause, kinds = _stats_kind_filter([kind])
+            where.append(clause)
+            params.extend(kinds)
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
         query = f"""
-            SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
+            SELECT CASE WHEN UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')
+                THEN 'UNKNOWN' ELSE plate END AS plate_key, COUNT(*) as count
             FROM events
             WHERE {" AND ".join(where)}
-            GROUP BY plate
-            ORDER BY count DESC
+            GROUP BY plate_key
+            ORDER BY count DESC, plate_key ASC
             LIMIT 1
         """
         row = conn.execute(query, params).fetchone()
@@ -1031,19 +1146,20 @@ def _stats_top_plate(window, kind):
 
 
 def _stats_top_plate_multi(window, kinds):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        where = ["kind IN ({})".format(",".join(["?"] * len(kinds)))]
-        params = list(kinds)
+        clause, params = _stats_kind_filter(kinds)
+        where = [clause]
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
         query = f"""
-            SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
+            SELECT CASE WHEN UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')
+                THEN 'UNKNOWN' ELSE plate END AS plate_key, COUNT(*) as count
             FROM events
             WHERE {" AND ".join(where)}
-            GROUP BY plate
-            ORDER BY count DESC
+            GROUP BY plate_key
+            ORDER BY count DESC, plate_key ASC
             LIMIT 1
         """
         row = conn.execute(query, params).fetchone()
@@ -1055,19 +1171,20 @@ def _stats_top_plate_multi(window, kinds):
 
 
 def _stats_top_list(window, kinds, limit=12):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        where = ["kind IN ({})".format(",".join(["?"] * len(kinds)))]
-        params = list(kinds)
+        clause, params = _stats_kind_filter(kinds)
+        where = [clause]
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
         query = f"""
-            SELECT COALESCE(NULLIF(plate, ''), 'UNKNOWN') as plate, COUNT(*) as count
+            SELECT CASE WHEN UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')
+                THEN 'UNKNOWN' ELSE plate END AS plate_key, COUNT(*) as count
             FROM events
             WHERE {" AND ".join(where)}
-            GROUP BY plate
-            ORDER BY count DESC
+            GROUP BY plate_key
+            ORDER BY count DESC, plate_key ASC
             LIMIT ?
         """
         rows = conn.execute(query, (*params, limit)).fetchall()
@@ -1081,7 +1198,7 @@ def _stats_busiest_bucket(window):
     bucket = "day"
     if window and window >= now - timedelta(days=2):
         bucket = "hour"
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         if bucket == "hour":
             rows = conn.execute(
@@ -1125,13 +1242,14 @@ def _stats_busiest_bucket(window):
 
 
 def _stats_processing_ms(window, kind=None):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["processing_time_ms IS NOT NULL", "processing_time_ms >= 0"]
         params = []
         if kind:
-            where.append("kind = ?")
-            params.append(kind)
+            clause, kinds = _stats_kind_filter([kind])
+            where.append(clause)
+            params.extend(kinds)
         if window:
             where.append("captured_at >= ?")
             params.append(window.strftime("%Y-%m-%d %H:%M:%S"))
@@ -1147,9 +1265,12 @@ def _stats_processing_ms(window, kind=None):
 
 
 def _stats_no_plate(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
-        where = ["(plate IS NULL OR plate = '')", "kind IN ('recognised', 'unmatched', 'candidate')"]
+        where = [
+            "UPPER(TRIM(COALESCE(plate, ''))) IN ('', 'UNKNOWN')",
+            "kind IN ('recognised', 'unmatched', 'candidate')",
+        ]
         params = []
         if window:
             where.append("captured_at >= ?")
@@ -1166,7 +1287,7 @@ def _stats_no_plate(window):
 
 
 def _stats_recent_gate_opens(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["kind IN ('recognised', 'manual_open')"]
         params = []
@@ -1183,7 +1304,7 @@ def _stats_recent_gate_opens(window):
 
 
 def _stats_source_breakdown(window):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["kind IN ('recognised', 'manual_open')"]
         params = []
@@ -1206,7 +1327,7 @@ def _stats_source_breakdown(window):
 
 
 def _stats_manual_open_top_ips(window, limit=5):
-    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn = _stats_connection()
     try:
         where = ["kind = 'manual_open'", "request_ip IS NOT NULL", "request_ip != ''"]
         params = []
@@ -1239,6 +1360,10 @@ def get_stats():
     summary = {kind: count for kind, count in counts}
     total = sum(summary.values())
     timeseries = _stats_timeseries(window)
+    # Include the Pi's civil-time range so charts can retain quiet buckets
+    # without relying on a display's clock or timezone.
+    timeseries["start"] = window.strftime("%Y-%m-%d %H:%M:%S") if window else None
+    timeseries["end"] = now_local_str()
     gate_opens = _stats_recent_gate_opens(window)
     return jsonify(
         {
@@ -1306,7 +1431,13 @@ def list_images():
 @app.route("/api/stream", methods=["GET"])
 def stream_info():
     stream_url = os.getenv("GATE_WEB_STREAM_URL", "").strip()
-    return jsonify({"url": stream_url})
+    data = {"url": stream_url}
+    if stream_url == "/static/stream.jpg" and os.getenv("GATE_WEB_STREAM_PROFILES", "0") == "1":
+        data["profiles"] = {
+            "tablet": "/static/stream-tablet.jpg",
+            "kiosk": "/static/stream-kiosk.jpg",
+        }
+    return jsonify(data)
 
 
 @app.route("/api/config", methods=["GET"])
@@ -1345,25 +1476,28 @@ def ui_settings():
     return jsonify({"theme_mode": theme_mode, **sun_payload})
 
 
+def _stream_frame_status():
+    now = time.time()
+    try:
+        frame = os.stat(STREAM_JPEG_PATH)
+        if frame.st_size > 0:
+            return now, frame.st_mtime, max(0, now - frame.st_mtime)
+    except OSError:
+        pass
+    return now, None, None
+
+
 @app.route("/api/stream-lag", methods=["GET"])
 def stream_lag():
-    stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    now = datetime.now(timezone.utc).timestamp()
-    if not os.path.exists(stream_path):
-        return jsonify({"lag_ms": None, "frame_mtime": None})
-    mtime = os.path.getmtime(stream_path)
-    lag_ms = max(0, (now - mtime) * 1000)
-    return jsonify({"lag_ms": int(lag_ms), "frame_mtime": mtime, "server_time": now})
+    now, mtime, age = _stream_frame_status()
+    lag_ms = int(age * 1000) if age is not None else None
+    return jsonify({"lag_ms": lag_ms, "frame_mtime": mtime, "server_time": now})
 
 
 @app.route("/api/stream-health", methods=["GET"])
 def stream_health():
-    stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    now = datetime.now(timezone.utc).timestamp()
-    stale_seconds = int(os.getenv("GATE_WEB_STREAM_STALE_SECONDS", "10"))
-    stream_mtime = os.path.getmtime(stream_path) if os.path.exists(stream_path) else None
-    stream_age = now - stream_mtime if stream_mtime else None
-    stream_stale = stream_age is None or stream_age > stale_seconds
+    now, stream_mtime, stream_age = _stream_frame_status()
+    stream_stale = stream_age is None or stream_age > STREAM_STALE_SECONDS
 
     return jsonify(
         {
@@ -1371,7 +1505,7 @@ def stream_health():
             "stream_mtime": stream_mtime,
             "stream_age_s": stream_age,
             "stream_stale": stream_stale,
-            "stale_threshold_s": stale_seconds,
+            "stale_threshold_s": STREAM_STALE_SECONDS,
             "ok": not stream_stale,
         }
     )
@@ -1395,6 +1529,121 @@ def _systemctl_is_active(service):
     return result.stdout.strip() or "unknown"
 
 
+def _read_home_service_states():
+    names = {
+        "alprd": "alprd",
+        "gate_anpr": "gate_anpr",
+        "stream_jpeg": "gate_anpr_stream_jpeg",
+        "beanstalkd": "beanstalkd",
+    }
+    unknown = dict.fromkeys(names, "unknown")
+    try:
+        result = subprocess.run(["systemctl", "is-active", *names.values()], capture_output=True, text=True, timeout=1)
+        states = result.stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return unknown
+    if len(states) != len(names):
+        return unknown
+    return dict(zip(names, states))
+
+
+def _home_service_snapshot():
+    # Only one browser refreshes this cache. Others get the previous, explicitly
+    # timestamped result rather than occupying web threads waiting for systemd.
+    if HOME_SERVICE_LOCK.acquire(blocking=False):
+        try:
+            checked = HOME_SERVICE_CACHE["checked_monotonic"]
+            if checked is None or time.monotonic() - checked >= 5:
+                HOME_SERVICE_CACHE.update(
+                    services=_read_home_service_states(), checked_at=time.time(), checked_monotonic=time.monotonic()
+                )
+        finally:
+            HOME_SERVICE_LOCK.release()
+    return dict(HOME_SERVICE_CACHE["services"]), HOME_SERVICE_CACHE["checked_at"]
+
+
+def _timestamp_epoch(value):
+    parsed = parse_local_timestamp(value)
+    return parsed.timestamp() if parsed else None
+
+
+def _decision_sampling():
+    return {
+        "per_reason_plate_seconds": RECENT_DECISION_SAMPLE_SECONDS,
+        "global_seconds": RECENT_DECISION_GLOBAL_SAMPLE_SECONDS,
+        "retained_limit": RECENT_DECISIONS_LIMIT,
+    }
+
+
+def _recent_decision_payloads(limit):
+    items = read_recent_decisions(EVENTS_DB_PATH, limit=limit)
+    for item in items:
+        item["plate"] = _display_plate(item["plate"])
+        # A stale-capture decision is recent even though its source image is old.
+        item["seen_at"] = _timestamp_epoch(item["created_at"])
+        image_name = item["image_name"] or ""
+        item["image_url"] = f"/images/{image_name}" if image_name else ""
+        item["preview_url"] = f"/previews/{image_name}?size=640" if image_name else ""
+        item["thumbnail_url"] = f"/previews/{image_name}?size=160" if image_name else ""
+    return items
+
+
+@app.route("/api/decisions", methods=["GET"])
+def get_decisions():
+    try:
+        decisions = _recent_decision_payloads(_int_arg("limit", 30, 1, 100))
+    except sqlite3.Error:
+        return jsonify({"error": "Recognition decisions are temporarily unavailable"}), 503
+    return jsonify({"decisions": decisions, "sampling": _decision_sampling()})
+
+
+@app.route("/api/home-status", methods=["GET"])
+def home_status():
+    now = time.time()
+    until = datetime.fromtimestamp(now)
+    try:
+        recognised = _query_events(kinds=["recognised"], limit=2, until=until)
+        unfamiliar = _query_events(
+            kinds=["unmatched"],
+            limit=1,
+            since=until - timedelta(seconds=UNFAMILIAR_MAX_AGE_SECONDS),
+            until=until,
+        )
+    except sqlite3.Error:
+        return jsonify({"error": "Arrival information is temporarily unavailable"}), 503
+    for event in recognised + unfamiliar:
+        event["seen_at"] = _timestamp_epoch(event["captured_at"])
+    unfamiliar = [event for event in unfamiliar if event["seen_at"] is not None]
+    for event in unfamiliar:
+        event["expires_at"] = event["seen_at"] + UNFAMILIAR_MAX_AGE_SECONDS
+    try:
+        recent_decisions = _recent_decision_payloads(3)
+        decisions_available = True
+    except sqlite3.Error:
+        # An older worker/schema during deployment need not hide camera status.
+        recent_decisions = []
+        decisions_available = False
+    services, checked_at = _home_service_snapshot()
+    now, _, stream_age = _stream_frame_status()
+    return jsonify(
+        {
+            "server_time": now,
+            "stream": {
+                "age_seconds": stream_age,
+                "fresh": stream_age is not None and stream_age <= STREAM_STALE_SECONDS,
+                "stale_after_seconds": STREAM_STALE_SECONDS,
+            },
+            "services": services,
+            "services_checked_at": checked_at,
+            "recognised": recognised,
+            "unfamiliar": unfamiliar,
+            "recent_decisions": recent_decisions,
+            "decisions_available": decisions_available,
+            "decision_sampling": _decision_sampling(),
+        }
+    )
+
+
 def _latest_event_timestamp():
     conn = sqlite3.connect(EVENTS_DB_PATH)
     try:
@@ -1408,21 +1657,24 @@ def _latest_event_timestamp():
 def healthz():
     db_ok, db_error = sqlite_healthcheck(EVENTS_DB_PATH)
     allowlist_ok = os.path.exists(ALLOWLIST_PATH) and os.access(ALLOWLIST_PATH, os.R_OK)
-    stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    stream_exists = os.path.exists(stream_path)
+    _, _, stream_age = _stream_frame_status()
+    stream_exists = stream_age is not None
+    stream_fresh = stream_exists and stream_age <= STREAM_STALE_SECONDS
     services = {
         "alprd": _systemctl_is_active("alprd"),
         "gate_anpr": _systemctl_is_active("gate_anpr"),
         "gate_anpr_web": _systemctl_is_active("gate_anpr_web"),
+        "beanstalkd": _systemctl_is_active("beanstalkd"),
+        "gate_anpr_stream_jpeg": _systemctl_is_active("gate_anpr_stream_jpeg"),
     }
-    ok = db_ok and allowlist_ok and services["gate_anpr_web"] == "active"
+    ok = db_ok and allowlist_ok and stream_fresh and all(status == "active" for status in services.values())
     maint = _maintenance_health()
     return jsonify(
         {
             "ok": ok,
             "db": {"ok": db_ok, "error": db_error},
             "allowlist": {"ok": allowlist_ok},
-            "stream": {"exists": stream_exists},
+            "stream": {"exists": stream_exists, "fresh": stream_fresh, "age_seconds": stream_age},
             "services": services,
             "maintenance": {
                 "last_success": maint.get("last_success"),
@@ -1518,6 +1770,49 @@ def logs():
             "error": error,
         }
     )
+
+
+@app.route("/previews/<name>")
+def get_preview(name):
+    """Decode each original once per size, then serve the cached small JPEG."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:jpg|jpeg)", name, re.IGNORECASE):
+        abort(404)
+    size = request.args.get("size", "640")
+    if size not in {"160", "640"}:
+        abort(400)
+    original = os.path.join(PLATES_DIR, name)
+    if not os.path.realpath(original).startswith(os.path.realpath(PLATES_DIR) + os.sep):
+        abort(404)
+    try:
+        stat = os.stat(original)
+    except OSError:
+        abort(404)
+    # Include source identity so corrected/replaced captures cannot reuse a stale file.
+    key = hashlib.sha256(f"{name}:{stat.st_mtime_ns}:{stat.st_size}:{size}".encode()).hexdigest()
+    cache_dir = os.path.join(PLATES_DIR, ".previews")
+    cache_name = key + ".jpg"
+    cache_path = os.path.join(cache_dir, cache_name)
+    with PREVIEW_LOCK:
+        if not os.path.isfile(cache_path):
+            os.makedirs(cache_dir, exist_ok=True)
+            temporary = None
+            try:
+                with Image.open(original) as image:
+                    image.draft("RGB", (int(size), int(size)))
+                    image = ImageOps.exif_transpose(image)
+                    image.thumbnail((int(size), int(size)), Image.Resampling.LANCZOS)
+                    with tempfile.NamedTemporaryFile(dir=cache_dir, suffix=".tmp", delete=False) as handle:
+                        temporary = handle.name
+                        image.convert("RGB").save(handle, format="JPEG", quality=75)
+                    # Existing capture retention also cleans previews at the same age.
+                    os.utime(temporary, (stat.st_atime, stat.st_mtime))
+                    os.replace(temporary, cache_path)
+            except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
+                abort(404)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+    return send_from_directory(cache_dir, cache_name)
 
 
 @app.route("/images/<path:name>")

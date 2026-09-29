@@ -36,7 +36,7 @@
         <div class="card-head">
           <div>
             <h1>Plate Allowlist</h1>
-            <p>Saved to the Pi allowlist JSON.</p>
+            <p>Add each person's plates, separated by commas. Use letters, numbers and optional spaces.</p>
           </div>
         </div>
         <div id="plates-list" class="plates"></div>
@@ -44,6 +44,7 @@
           <button id="add-plate" class="btn btn-secondary">Add</button>
           <button id="save-plates" class="btn">Save</button>
         </div>
+        <div id="allowlist-status" class="allowlist-status" role="status">Loading plates…</div>
       </section>
 
       <section class="card">
@@ -69,8 +70,8 @@
 
     <template id="plate-row">
       <div class="plate-row">
-        <input class="owner-input" placeholder="Owner" />
-        <input class="plates-input" placeholder="PLATES (comma separated)" />
+        <input class="owner-input" placeholder="Owner" aria-label="Owner" />
+        <input class="plates-input" placeholder="PLATES (comma separated)" aria-label="Number plates, comma separated" autocapitalize="characters" autocorrect="off" spellcheck="false" />
         <div class="plate-meta"></div>
         <button class="btn btn-ghost remove-plate">Remove</button>
       </div>

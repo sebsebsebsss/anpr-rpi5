@@ -16,7 +16,7 @@ function setup(options = {}) {
   let loaded = 0;
   const document = {
     hidden: false,
-    body: { classList: { contains: () => false } },
+    body: { classList: { contains: (name) => name === "fullscreen-page" && !!options.kiosk } },
     getElementById: () => null,
     querySelector: () => null,
   };
@@ -54,6 +54,9 @@ function setup(options = {}) {
         }
       }, options.delay === undefined ? 800 : options.delay);
     }
+    closest() {
+      return { classList: { contains: () => !options.inactive } };
+    }
     removeAttribute(name) {
       assert(name === "src", "Only the pending image should be cancelled");
       clearTimeout(this.pending);
@@ -62,20 +65,20 @@ function setup(options = {}) {
   // Load the actual application, with unrelated startup fetches left pending.
   const fetch = () => new Promise(() => {});
   const app = new Function(
-    "document", "window", "navigator", "Image", "setTimeout", "clearTimeout", "fetch",
-    source + "\nreturn { createLegacyStreamImage, state, LEGACY_IOS };"
-  )(document, { fetch }, { userAgent: "iPad; CPU OS 12_5_8 like Mac OS X" },
-    Image, setTimeout, clearTimeout, fetch);
-  assert(app.LEGACY_IOS, "iPad mini 3 must use the legacy stream");
+    "document", "window", "navigator", "Image", "setTimeout", "clearTimeout", "fetch", "Date",
+    source + "\nreturn { createLegacyStreamImage, homeStreamUrl, state, LEGACY_IOS };"
+  )(document, { fetch, innerWidth: options.width || 1280 }, { userAgent: options.userAgent || "iPad; CPU OS 12_5_8 like Mac OS X" },
+    Image, setTimeout, clearTimeout, fetch, { now: () => now });
+  if (!options.userAgent) assert(app.LEGACY_IOS, "iPad mini 3 must use the legacy stream");
   app.createLegacyStreamImage("/static/stream.jpg?camera=gate");
-  return { advance, requests, options, document, state: app.state, loaded: () => loaded };
+  return { app, advance, requests, options, document, state: app.state, loaded: () => loaded };
 }
 
 const slow = setup();
 slow.advance(799);
 assert(slow.requests.length === 1, "Do not replace a frame still loading after 200 ms");
 slow.advance(4201);
-assert(slow.loaded() === 5, "Slow frames must keep displaying instead of being cancelled");
+assert(slow.loaded() === 6, "Slow frames must keep displaying instead of being cancelled");
 assert(new Set(slow.requests).size === slow.requests.length, "Each request must bypass cache");
 assert(slow.requests.every((url) => url.includes("?camera=gate&ts=")), "Preserve existing query parameters");
 
@@ -111,4 +114,23 @@ paused.document.hidden = false;
 paused.advance(1100);
 assert(paused.loaded() === 2, "Resume frames when the page is visible again");
 
-report("Stream refresh regression checks passed");
+const paced = setup({ delay: 150 });
+paced.advance(1000);
+assert(paced.loaded() === 5, "Download time must count toward the frame interval, not add to it");
+const inactive = setup({ inactive: true });
+inactive.advance(2000);
+assert(inactive.requests.length === 0, "A hidden app tab must not compete for image bandwidth");
+inactive.options.inactive = false;
+inactive.advance(1100);
+assert(inactive.loaded() >= 1, "Switching back to the stream must resume frames");
+
+const profiles = { url: "/static/stream.jpg", profiles: {
+  tablet: "/static/stream-tablet.jpg", kiosk: "/static/stream-kiosk.jpg",
+} };
+assert(setup().app.homeStreamUrl(profiles) === profiles.profiles.tablet, "Old iPad Home uses its smaller JPEG");
+assert(setup({kiosk: true, userAgent: "Chrome"}).app.homeStreamUrl(profiles) === profiles.profiles.kiosk, "Pi one-pager uses the smallest JPEG");
+assert(setup({userAgent: "Chrome", width: 1440}).app.homeStreamUrl(profiles) === profiles.url, "Large desktop Home retains full-size JPEG");
+assert(setup({userAgent: "Chrome", width: 390}).app.homeStreamUrl(profiles) === profiles.profiles.tablet, "Phone Home can use the compact JPEG");
+assert(setup().app.homeStreamUrl({url: profiles.url}) === profiles.url, "Older servers retain the original feed");
+assert(setup().app.homeStreamUrl({url: profiles.url, profiles: {tablet: "https://untrusted.example/frame"}}) === profiles.url, "Profile selection accepts only known local JPEG paths");
+report("Stream refresh and device profile regression checks passed");

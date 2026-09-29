@@ -23,7 +23,10 @@ def build_job(plate, epoch_ms):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Enqueue a synthetic ALPR job for gate_anpr testing.")
+    parser = argparse.ArgumentParser(description="Preview a synthetic ALPR job; enqueue only with --enqueue.")
+    parser.add_argument(
+        "--enqueue", action="store_true", help="Send to the worker queue: an allowed plate can activate the gate"
+    )
     parser.add_argument("--plate", default="A1ABC", help="Plate string to send")
     parser.add_argument(
         "--delay",
@@ -40,6 +43,10 @@ def main():
 
     epoch_ms = int((time.time() + args.delay) * 1000)
     job = build_job(args.plate, epoch_ms)
+
+    if not args.enqueue:
+        print(json.dumps(job, indent=2))
+        return
 
     client = greenstalk.Client((args.host, args.port))
     client.use(args.tube)

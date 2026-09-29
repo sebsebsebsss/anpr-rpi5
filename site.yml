@@ -25,6 +25,11 @@
     alprd_stream_is_http: "{{ alprd_stream is match('^https?://') }}"
     alprd_cpu_affinity: "{{ lookup('env', 'ALPRD_CPU_AFFINITY') | default('', true) }}"
     alprd_roi: "{{ lookup('env', 'ALPRD_ROI') | default('', true) }}"
+    # Optional private, controller-local image. Empty keeps full-frame detection.
+    alpr_detection_mask_source: "{{ lookup('env', 'ALPR_DETECTION_MASK_SOURCE') | default('', true) }}"
+    alpr_detection_mask_path: "{{ alpr_conf_dir }}/detection-mask.png"
+    alpr_mask_max_plate_width_percent: "{{ lookup('env', 'ALPR_MASK_MAX_PLATE_WIDTH_PERCENT') | default('30', true) }}"
+    alpr_mask_max_plate_height_percent: "{{ lookup('env', 'ALPR_MASK_MAX_PLATE_HEIGHT_PERCENT') | default('10', true) }}"
 
     gate_anpr_env_path: "{{ playbook_dir }}/files/gate_anpr.env"
     gate_web_stream_url: "{{ lookup('env', 'GATE_WEB_STREAM_URL') | default('/static/stream.jpg', true) }}"
@@ -34,9 +39,23 @@
     gate_web_stream_height: "{{ lookup('env', 'GATE_WEB_STREAM_HEIGHT') | default('720', true) }}"
     gate_web_port: "{{ lookup('env', 'GATE_WEB_PORT') | default('80', true) }}"
     gate_api_shared_secret: "{{ lookup('env', 'GATE_API_SHARED_SECRET') | default('', true) }}"
-    gate_web_stream_encoder: "{{ lookup('env', 'GATE_WEB_STREAM_ENCODER') | default('libx264', true) }}"
-    gate_web_stream_hls_dir: "{{ app_dir }}/web/static/hls"
-    gate_web_stream_jpeg: "{{ app_dir }}/web/static/stream.jpg"
+    gate_web_stream_jpeg: "{{ lookup('env', 'GATE_WEB_STREAM_JPEG') | default('/run/gate-anpr/stream.jpg', true) }}"
+    gate_backup_dir: /var/backups/gate-anpr
+    gate_backup_keep: 7
+    gate_backup_database: false
+    gate_replace_env: false
+    gate_stream_overrides: {}
+    gate_https_enabled: "{{ lookup('env', 'GATE_HTTPS_ENABLED') | default('false', true) | bool }}"
+    gate_https_acme_enabled: "{{ lookup('env', 'GATE_HTTPS_ACME_ENABLED') | default('false', true) | bool }}"
+    gate_https_domain: "{{ lookup('env', 'GATE_HTTPS_DOMAIN') | default('', true) | trim | lower }}"
+    gate_https_challenge_alias: "{{ lookup('env', 'GATE_HTTPS_CHALLENGE_ALIAS') | default('', true) | trim | lower }}"
+    gate_https_cert_path: "{{ '/etc/gate-anpr/tls/current/fullchain.pem' if gate_https_acme_enabled | bool else (lookup('env', 'GATE_HTTPS_CERT_PATH') | default('/etc/gate-anpr/tls/fullchain.pem', true)) }}"
+    gate_https_key_path: "{{ '/etc/gate-anpr/tls/current/privkey.pem' if gate_https_acme_enabled | bool else (lookup('env', 'GATE_HTTPS_KEY_PATH') | default('/etc/gate-anpr/tls/privkey.pem', true)) }}"
+    gate_https_min_valid_seconds: 86400
+    gate_https_dns_env_path: "{{ playbook_dir }}/files/gate_https_dns.env"
+    # acme.sh 3.1.6, verified signed tag and immutable archive checksum.
+    gate_https_acme_commit: 807da6498377ee5e0cf43a78091f46f12dc59a89
+    gate_https_acme_archive_sha256: ddbe1bcbd1a44a2623a2af167ebdc678669e6e2eb396742f2d1d28e02dc14220
 
     gatepi_alias_hostname: "{{ lookup('env', 'GATEPI_ALIAS_HOSTNAME') | default('gate', true) }}"
     run_openalpr_smoketest: false

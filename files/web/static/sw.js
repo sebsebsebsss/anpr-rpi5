@@ -5,6 +5,7 @@ const SHELL = [
   "/",
   "/static/app.js",
   "/static/styles.css",
+  "/static/stats.css",
   "/static/manifest.json",
   "/static/fonts/space-grotesk.woff2",
 ];
