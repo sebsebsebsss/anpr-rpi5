@@ -127,7 +127,7 @@ unproven production setting on the strength of this result. The baseline is
 [OpenMP specification](https://www.openmp.org/spec-html/5.0/openmpse58.html),
 [Tesseract guidance](https://tesseract-ocr.github.io/tessdoc/FAQ.html#can-i-increase-speed-of-ocr)
 
-## Detection area: audit only
+## Detection area: archive audit and temporary CPU comparison
 
 The private inventory includes every retained image, including files without a
 current database row. Full-coverage contact sheets and full-resolution inspection
@@ -153,30 +153,79 @@ near the side edges and approach road, so retain **all width and the top**.
 The lowest inspected close-approach plate reaches approximately 70.3% of frame
 height; a conservative observed bound is 72%. Keeping the top 85% leaves about
 223 source pixels below that observed plate. Excluding the bottom 15% is therefore
-a plausible **offline test candidate**, not a production recommendation. Given
-the excellent reported hit rate and modest potential benefit, keep full-frame
-recognition until a separate parity and timing comparison justifies a change.
+a plausible **temporary CPU-test candidate**. A guarded quiet-window comparison
+can measure CPU savings without first building an offline replay. Before leaving
+the mask enabled, separately check recognition parity and arrival timing.
 
 The installed resize code is width-first: when source width exceeds 1280, it
 uses that width ratio and skips the 720-height branch. Integer output dimensions
 therefore make the current 2688×1520 input **1280×723**, despite the nominal
-1280×720 configuration. Retaining full width and 85% height (2688×1292) yields
-**1280×615**, or **14.94% fewer detector-search pixels**. Original-frame area
-falls 15%. This is geometry only; total CPU savings remain unmeasured.
+1280×720 configuration. An ideal full-width 85%-height crop (2688×1292) would
+yield 1280×615, or 14.94% fewer detector-search pixels. The installed mask code
+subtracts inclusive bounds without adding one, however: that bitmap produces a
+2687×1291 search rectangle, then **1280×614**, or **15.08% fewer search pixels**.
+It also excludes the last right-edge pixel. These are search-area calculations,
+not predictions of equal total-CPU savings.
 
 The installed `detection_mask_image` option is relevant; the daemon's `roi=`
 option is ignored. OpenALPR crops to the mask's bounding rectangle **before**
 choosing its detector scale. A width reduction can increase that scale and
-cancel an apparent pixel saving. Therefore both original-image area and effective
-scaled detector area must be calculated. Neither predicts an equal percentage
-reduction in total CPU: decoding, tracking, OCR and other work remain.
-[Installed detector source](https://raw.githubusercontent.com/openalpr/openalpr/736ab0e608cf9b20d92f36a873bb1152240daa98/src/openalpr/detection/detector.cpp)
+cancel an apparent pixel saving. The mask also adds full-frame allocation and
+bitwise operations. Therefore both original-image area and effective scaled
+detector area must be calculated. Neither predicts an equal percentage reduction
+in total CPU: decoding, tracking, OCR and other work remain.
+
+The maximum candidate plate size is proportional to the cropped rectangle. With
+the current 10% maximum-height setting, this mask reduces the permitted height
+from approximately 152 to 129 source pixels (72 to 61 detector pixels). It can
+therefore change which plates qualify even above the mask boundary; a location
+audit alone does not establish recognition parity.
+[Installed detector source](https://raw.githubusercontent.com/openalpr/openalpr/736ab0e608cf9b20d92f36a873bb1152240daa98/src/openalpr/detection/detector.cpp),
+[installed mask source](https://raw.githubusercontent.com/openalpr/openalpr/736ab0e608cf9b20d92f36a873bb1152240daa98/src/openalpr/detection/detectormask.cpp)
 
 The saved archive is biased towards scenes the system retained. It cannot prove
 safety for an unseen approach or establish an independently measured hit rate.
 A candidate still needs unmasked/masked comparisons, generous margins and
-separate arrival-timing checks before any live use. Keeping the full frame is
-reasonable if the potential saving is small or uncertainty remains.
+separate arrival-timing checks before leaving a mask enabled for normal use.
+A temporary CPU comparison with automatic gate handling paused is a narrower
+experiment. Keeping the full frame is reasonable if the saving is small or
+uncertainty remains.
+
+### Quiet-window mask trial: useful saving, full frame restored
+
+A guarded full frame → top-85% mask → full frame comparison ran on the Pi.
+Each phase restarted the recognizer, warmed for 20 seconds and measured its
+entire cgroup for approximately 35 seconds. Camera settings, OCR threads and
+preview profiles stayed unchanged. The automatic gate worker was paused; no
+jobs appeared, and no gate commands or notifications were issued by the test.
+
+| Phase | Recognition CPU, one-core scale | JPEG producer CPU | End temperature |
+| --- | ---: | ---: | ---: |
+| Full frame, before | 146.68% | 21.60% | 58.40°C |
+| Top-85% mask | 126.47% | 21.86% | 56.20°C |
+| Full frame, after | 144.39% | 21.83% | 57.85°C |
+
+Against the mean of the two full-frame windows, recognition used **13.1% less
+CPU**. That is **4.77 percentage points of the whole four-core Pi**, rather than
+13.1% of its total capacity. The masked result was below both baseline windows;
+preview CPU stayed essentially unchanged. No throttling flags appeared. These
+short temperature samples do not establish a sustained cooling improvement.
+
+The independent five-minute rollback guard was tested unarmed first. A temporary
+`/run` configuration directory and systemd override selected the mask; original
+production files were untouched. Restoration stopped recognition, removed the
+override and waited 12 seconds so queued captures would fail the worker's
+10-second age limit before normal gate handling resumed. Original hashes matched,
+recognition and gate worker were active/enabled, the queue was empty, and web and
+preview processes kept their original PIDs. Temporary copied configuration, mask,
+runner and timers were removed after verification.
+
+This is evidence that the **mask configuration as tested** saves quiet-scene CPU,
+not recognition-parity evidence. It includes the changed maximum candidate-size
+threshold described above. A useful next comparison would preserve the original
+permitted plate size, replay retained close/edge cases against full-frame results,
+and remeasure CPU before enabling a mask for ordinary arrivals. Full-frame
+recognition remains the production setting.
 
 ## Hardware offload has several different meanings
 
