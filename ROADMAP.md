@@ -12,12 +12,16 @@ hardware work. These are relative sizes, not delivery estimates.
 
 | ID | Status | Improvement | Acceptance criteria |
 |---|---|---|---|
-| UX-01 | Planned | Truthful home-screen status (M) | Distinguish displayed-frame stall, stale camera source and unavailable status; recover automatically; pause hidden polling; work on iOS 12. Service activity is labelled as such. |
-| UX-02 | Planned | Unfamiliar-arrival card (S/M) | Show a recent unmatched capture, preview and age; expire after five minutes even during network failure; keep the last two recognised arrivals; never assert that a vehicle is still present. |
-| CFG-01 | Planned | Forgiving plate entry (S/M) | Ignore presentation whitespace when matching; validate new entries and detect normalised collisions; preserve existing display spelling; errors do not overwrite the saved allowlist. |
-| UX-03 | Planned | Explain recognition decisions (M) | Existing events record match/reason/relay-command outcome; expose bounded, explicitly sampled recent skipped/error decisions; preserve opening, dedupe and notification behaviour; never infer physical gate position. |
+| UX-01 | Delivered | Truthful home-screen status (M) | Distinguish displayed-frame stall, stale camera source and unavailable status; recover automatically; pause hidden polling; work on iOS 12. Service activity is labelled as such. |
+| UX-02 | Delivered | Unfamiliar-arrival card (S/M) | Show a recent unmatched capture, preview and age; expire after five minutes even during network failure; keep the last two recognised arrivals; never assert that a vehicle is still present. |
+| CFG-01 | Delivered | Forgiving plate entry (S/M) | Ignore presentation whitespace when matching; validate new entries and detect normalised collisions; preserve existing display spelling; errors do not overwrite the saved allowlist. |
+| UX-03 | Delivered | Explain recognition decisions (M) | Existing events record match/reason/relay-command outcome; expose bounded, explicitly sampled recent skipped/error decisions; preserve opening, dedupe and notification behaviour; never infer physical gate position. |
 
 ## Next reliability and recognition work
+
+Recommended next batch: REL-01 and REL-02 first, then REL-03/REL-04. Build the
+private replay harness (REC-01) before changing recognition policy or reducing
+analysis CPU. Smaller preview profiles (PERF-03) can be compared independently.
 
 | ID | Priority / effort | Improvement | Acceptance criteria / dependency |
 |---|---|---|---|
@@ -35,6 +39,8 @@ hardware work. These are relative sizes, not delivery estimates.
 | CFG-02 | Medium / S/M | Safer allowlist editing | Unsaved indicators, useful row errors, undo and revision checks prevent silent overwrite from another screen. |
 | CFG-03 | Medium / M | Effective configuration view | Redacted active settings and shared validation make local/remote overrides clear; durable writes for infrequently changed configuration. |
 | MAINT-01 | Ongoing / S/M | Dependency maintenance | Baseline audit cleared the reported advisories and CI now uses production pins. Repeat audits periodically and test compatible updates. |
+| MAINT-02 | Low / S | Ansible fact compatibility | Replace deprecated injected hostname/IP facts with explicit `ansible_facts` access; verify generated nginx aliases and host entries before future Ansible upgrades. |
+| MAINT-03 | Low / M | Narrow inherited Python packages | Retain working GPIO access while reducing unrelated system packages visible to the app environment; prove application dependencies and GPIO imports before switching. |
 
 ## Performance experiments
 
@@ -75,3 +81,40 @@ raising the JPEG output setting alone cannot create additional source frames.
 
 Each new completion should record its commit, automated checks, deployed checks,
 and remaining physical-device or real-vehicle verification here.
+
+
+## First-batch verification — 2026-09-29
+
+Implementation: [d3d9b9f](https://github.com/sebsebsebsss/anpr-rpi5/commit/d3d9b9f)
+on `feat/household-status-and-decisions`. Public baseline:
+[3c720f3](https://github.com/sebsebsebsss/anpr-rpi5/commit/3c720f3)
+on `chore/public-repo-review`.
+
+- 322 Python tests and all five JavaScript suites passed; Ruff lint/format,
+  Ansible syntax and diff checks passed.
+- Synthetic Chrome checks covered image/source/API failures, offline expiry,
+  decision availability and failed/successful allowlist saves. Both tablet
+  layouts fit 1024×768; phone layout had no horizontal overflow at 390px.
+  Additional JS cases cover hung requests/bodies, late responses without
+  AbortController, and a device clock that differs from the Pi.
+- Full Ansible deployment passed: 96 successful tasks, no failures. The saved
+  allowlist passed read-only validation before deployment; configuration was
+  backed up and retained. Ten deployed application files matched local hashes.
+- Live HTTPS browser checks passed on desktop and the throttled iOS 12
+  user-agent path: no page errors, no offscreen stream requests, at most 30
+  history cards, preview images only, and fresh Home/Live status. The short-name
+  redirect and trusted HTTPS certificate still passed.
+- The eight-second browser samples observed 5.75 and 5.37 JPEG load events/sec
+  respectively. These are Chrome measurements, not physical-iPad results or
+  counts of distinct camera frames. The first frames arrived within one second.
+- All four monitored services were active. Home status took about 3ms with a
+  populated service cache and 28ms for its first sampled request on the Pi.
+  The new decision store/API was available, with no natural arrivals recorded
+  during verification; decision outcomes and unfamiliar cards used synthetic
+  fixtures in the automated checks.
+- All 15 application dependencies on the Pi match the production pins and
+  satisfy their requirements. A whole-environment `pip check` still reports
+  unrelated Debian package metadata from system-site-packages; see MAINT-03.
+- Live checks sent no gate commands or notification jobs. Physical iPad WebKit
+  behavior and actual arrival/relay behavior remain to be observed in normal
+  use. Unit tests cover those decision and relay-call paths with test doubles.
