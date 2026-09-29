@@ -82,6 +82,22 @@ iPad, Pi and desktop viewport cases. The owner confirmed that the physical iPad
 now renders perfectly. Its actual image-load rate has not been reported; physical
 wall-device smoothness may differ from the Chrome measurements.
 
+### Sharing the tablet JPEG with the kiosk: measured, left unchanged
+
+A short low-priority comparison encoded the same private fixed JPEG at 10fps
+with 3→2→1→2→3 outputs, 80 frames per condition. Mean child-process CPU equivalent
+was 17.50% of one core for three outputs, 13.15% for main+tablet, and 8.02% for
+main alone. This isolates scaling/encoding; it is not a measurement of live
+RTSP decoding or physical-client performance. Removing the kiosk encode would
+therefore save approximately **1.09 percentage points of whole-Pi CPU** in this
+fixture, with the larger Live image still requiring its own output.
+
+The kiosk would then receive 800×450 instead of 640×360: 56% more decoded pixels
+and approximately 43% more JPEG bytes using the earlier live-size samples.
+Given the working wall displays and acceptance of the small server CPU cost,
+retain the three current sizes. The comparison created only temporary private
+images and made no camera, live-preview or recognition changes.
+
 ## OCR threads: trial completed, original setting restored
 
 The owner authorised a short quiet-period live comparison. An independent timed
