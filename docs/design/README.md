@@ -1,17 +1,20 @@
 # Screen design review
 
-The recommendation is to tighten the existing interface first. Its camera,
-gate control and recent sightings already suit dedicated household screens.
-The main problems are mobile spacing, competing status text and statistics
-without enough context, rather than a need for a new application framework.
+The selected direction is to tighten the existing interface. The primary
+devices are a wall-mounted landscape iPad and a Pi touchscreen. Home and
+`/fullscreen` must keep the camera, gate control and recent sightings visible
+on one screen, without document scrolling, internal scrolling or clipped
+content. The large gate button is essential: preserve or enlarge its touch
+area, use available space, and keep the camera uncropped. Phone changes must
+not compromise either dedicated display.
 
 The review branch changes the working frontend as follows:
 
 | Screen | Change |
 |---|---|
 | Phone | Compact two-row navigation, no duplicate clock, a short gate button visible in the first viewport, and compact arrival rows. |
-| Landscape iPad | Keep the uncropped camera and large control side by side; put status in pills and expand explanations only when requested. |
-| Small Pi screen | Preserve the fullscreen layout and large touch target; bound camera height so recent sightings remain visible. |
+| Landscape iPad | Keep the uncropped camera and large control side by side; remove page-padding overflow; put status in pills with overlay explanations. |
+| Small Pi screen | Use the available fullscreen width for the camera and larger gate target; keep recent sightings visible without scrolling. |
 | Desktop | Align the status pills with the camera heading and put the last decision beside arrival information. |
 
 Stats now has a time-labelled activity chart with quiet periods, ranked
@@ -21,35 +24,36 @@ not confirmed visits. Classification also handles older candidate records
 consistently with History. This has working API integration, unlike the
 alternative's deliberately simulated extra metrics.
 
-The alternative below explores flatter surfaces, more restrained typography
-and phone bottom navigation. These changes are independent of HTTPS, JPEG
-transport and the recognition engine. Neither design has been deployed as
-part of this review. Physical legacy-iPad WebKit remains a separate check
-from automated browser sizing and user-agent tests.
+The alternative redesign was rejected because its space allocation and smaller
+control do not suit the primary wall screens. It remains an archived study,
+not a proposed replacement. The selected changes are independent of HTTPS,
+JPEG transport and the recognition engine. Physical legacy-iPad WebKit remains
+a separate check from automated browser sizing and user-agent tests.
 
-## Interactive comparison
+## Selected interface preview
 
-Open [alternative.html](alternative.html) directly in a browser. It is a
-self-contained, responsive design preview: no server, dependencies, network
-requests, real camera images, registrations, hostnames or gate commands.
-Plain HTTP also works. HTTPS is not required.
-
-To compare this alternative with the actual current frontend using synthetic
-data, run from the repository root:
+To preview the actual frontend using synthetic data, run from the repository
+root:
 
 ```sh
 python3 tests/design_preview.py
 ```
 
-Open <http://127.0.0.1:8765/> for both choices. The existing Home is at
-`/current`, its Stats view at `/current#stats`, and this alternative at
-`/alternative`. The preview binds only to this machine, uses public static
+Open <http://127.0.0.1:8765/>. Home is at `/current`, the Pi display at
+`/fullscreen`, and Stats at `/current#stats`.
+The preview binds only to this machine, uses public static
 assets and synthetic API responses, blocks every write and intercepts gate
 buttons with a “Preview only” message. It reads no configuration, history,
 credentials or camera images and does not contact a Pi. Stop it with Ctrl+C;
 use `--port PORT` if 8765 is occupied. The current view's reporting periods
 demonstrate layout with the same 32 recognised / 10 unmatched / 2 manual sample
-counts; they are not independent real datasets.
+counts; they are not independent real datasets. Plain HTTP is sufficient.
+
+## Archived alternative — rejected
+
+[alternative.html](alternative.html) is a self-contained historical mockup,
+with no network requests, private images or real gate commands. It is not
+deployed or linked from the selected interface preview.
 
 Try Home and Insights, the reporting periods, the light/dark theme, either
 status pill, the simulated connection failure, camera expansion, a chart bar

@@ -62,7 +62,7 @@ function setup({ legacyIos = true } = {}) {
   const document = {
     hidden: false,
     listeners: {},
-    body: { classList: { contains: () => false } },
+    body: node("body"),
     getElementById: (id) => nodes[id] && nodes[id].attached ? nodes[id] : null,
     querySelector: () => null,
     querySelectorAll(selector) {

@@ -10,6 +10,12 @@ Keep plain LAN HTTP fully supported throughout this roadmap. HTTPS/ACME remain
 opt-in and disabled by default; core features must work without a domain,
 certificates or DNS credentials. Secure-context browser enhancements are optional.
 
+Primary UI requirement: the landscape iPad Home and Pi `/fullscreen` page fit
+their wall displays without scrolling or clipped content. Preserve or enlarge
+the large gate touch target and show the uncropped camera and latest arrivals.
+Phone improvements must preserve these layouts. The alternative redesign is
+rejected; the existing interface is the selected direction.
+
 Effort: **S** = contained change, **M** = several components, **L** = experiment or
 hardware work. These are relative sizes, not delivery estimates.
 
@@ -24,14 +30,17 @@ hardware work. These are relative sizes, not delivery estimates.
 
 ## Next reliability and recognition work
 
-The current review branch prioritises UX-10/UX-11 below. After choosing the
-visual direction, the useful reliability batch is REL-01, REL-02 and REL-04.
+The selected tightening and Stats changes (UX-10/UX-11) are deployed. The useful
+next reliability batch is REL-01, REL-02 and REL-04.
 REL-03 becomes worthwhile when simultaneous vehicles matter at this site.
 
-For performance, start with the existing detection mask (PERF-01), one smaller
-preview profile (PERF-03), and an OCR thread-limit comparison (PERF-05). Use a
-small private replay set (REC-01), then expand it only as needed. Measurements,
-limits and primary-source references are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Performance changes remain optional. A preview-only size comparison (PERF-03)
+is the most isolated trial; prepare timed restoration and measure both physical
+screens first. OCR thread limits (PERF-05) start with offline correctness checks,
+with live changes deferred. A detection mask (PERF-01) requires review and
+comparison of every retained historical image before excluding any area.
+Measurements, trial limits and restoration requirements are in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 Keep storage bounds and dependency upkeep. Defer native apps, new video
 transport, adaptive recognition, direction/presence inference and elaborate
@@ -40,13 +49,12 @@ Vehicle-history backups remain optional.
 
 | ID | Status / effort | Current design work | Acceptance criteria |
 |---|---|---|---|
-| UX-10 | Review branch / S/M | Compact status and layouts per screen | Status pills with touch-accessible detail; phone gate control in first viewport; uncropped camera; tablet and kiosk fit; light/dark and legacy sizing checked. |
-| UX-11 | Review branch / M | Useful activity statistics | Labelled time/count axes retain quiet periods; ranked counts replace word cloud; consistent legacy categories; no accuracy/visit/physical-open claims; errors, mobile and empty states work. |
+| UX-10 | Deployed; physical-screen observation pending / S/M | Compact status and layouts per screen | Wall displays first: no document/panel scrolling or clipped content, large gate target preserved/enlarged, uncropped camera and two recent arrivals visible; status details overlay; phone layout stays independent; light/dark and legacy sizing checked. |
+| UX-11 | Delivered / M | Useful activity statistics | Labelled time/count axes retain quiet periods; ranked counts replace word cloud; consistent legacy categories; no accuracy/visit/physical-open claims; errors, mobile and empty states work. |
 
-A separate interactive alternative lives in [docs/design/alternative.html](docs/design/alternative.html).
-Its proposed comparison/relay-total metrics are demo-only. UX-10/UX-11 are
-implemented for review on `design/device-layout-and-insights`; they are not yet
-marked delivered to the Pi.
+A rejected alternative is archived in [docs/design/alternative.html](docs/design/alternative.html).
+Its proposed comparison/relay-total metrics are demo-only. The selected
+UX-10/UX-11 implementation is on `design/device-layout-and-insights`.
 
 | ID | Priority / effort | Improvement | Acceptance criteria / dependency |
 |---|---|---|---|
@@ -71,14 +79,15 @@ marked delivered to the Pi.
 
 | ID | Effort | Improvement | Success measure / constraint |
 |---|---|---|---|
-| PERF-01 | S/M experiment | Supported detector mask | The daemon ignores `roi=`, but installed OpenALPR supports `detection_mask_image` and reduces the detector search rectangle. Configure a private mask and compare CPU/earliest detection with day/night/edge-of-frame examples using REC-01. Savings unmeasured. |
+| PERF-01 | Deferred pending archive review / M | Supported detector mask | Inventory/review every retained image, including unlinked files; compare baseline/candidate on the full private manifest; retain generous approach margins and validate timing separately. Installed `detection_mask_image` reduces the search rectangle; daemon `roi=` is ignored. No mask applied; savings unmeasured. |
 | PERF-02 | L | Activity-adaptive recognition | Keep a low baseline analysis rate and burst during activity; measure heat/CPU and arrival latency; test slow vehicles, rain and shadows. Depends on REC-01. |
-| PERF-03 | S/M | Small-screen preview profile | Compare smaller JPEGs and quality settings on physical screens; report displayed FPS and legibility, not just producer FPS. |
+| PERF-03 | Optional S/M trial | Small-screen preview profile | Compare 960×540 → 800×450 → restore, all at 10fps with one encoder; timed restoration; measure distinct displayed frames, responsiveness and detail on both wall screens. Recognition input stays unchanged. |
 | PERF-04 | Deferred / L | Modern video transport | Compare a compressed video relay for capable clients while retaining JPEG support for old displays; justify additional complexity with measurements. |
-| PERF-05 | S experiment | Limit nested OCR threads | Compare `OMP_THREAD_LIMIT=1` on the same private OCR workload; record CPU, throughput, recognition output and burst latency. No guaranteed idle saving. |
+| PERF-05 | Offline comparison first / S/M | Limit nested OCR threads | Compare unset against `OMP_THREAD_LIMIT=1` on identical private images, with GPIO/network inaccessible and resource limits. No guaranteed saving. Defer daemon trial until restart/dependent-worker and cooldown risks have a tested restoration path. |
 
-The currently measured preview source supplies about 10 distinct frames/second;
-raising the JPEG output setting alone cannot create additional source frames.
+The source probe reports an average of 10fps. Confirm actual distinct source
+frames during movement before selecting a higher preview rate; raising the JPEG
+output setting alone cannot create additional source frames.
 
 ## Household features and optional extensions
 
@@ -107,6 +116,33 @@ raising the JPEG output setting alone cannot create additional source frames.
 
 Each new completion should record its commit, automated checks, deployed checks,
 and remaining physical-device or real-vehicle verification here.
+
+## Wall-screen deployment verification — 2026-09-29
+
+The tightened existing interface is deployed; the alternative is rejected.
+
+- Six JavaScript suites, Ruff, diff and Ansible syntax checks passed. The
+  strengthened synthetic browser suite checks document and card overflow,
+  primary-content bounds, large touch targets, light/dark, usual and unfamiliar
+  arrivals, overlay diagnostics, legacy aspect-ratio fallback and returning
+  Home after scrolling Stats. No hidden-overflow workaround is used.
+- Web-only Ansible deployment completed with 44 successful tasks and no
+  failures. A private copy of the preceding web code was saved on the Pi for
+  rollback. All seven changed deployed web files matched local hashes.
+- Live read-only Chrome checks passed at iPad 1024×748 and fullscreen
+  800×480/1024×600: document dimensions equal the viewport, the camera uses
+  `contain`, and gate buttons measure 217×500, 196×343 and 257×463 respectively.
+  Synthetic checks also cover fullscreen 1280×800 with a 327×663 button.
+  Live Stats loads and returning Home restores the non-scrolling layout.
+- Application/recognizer configuration and the allowlist retained their
+  hashes. OpenALPR, the gate worker and JPEG producer retained their process
+  IDs. All six checked services were active and the shared JPEG was fresh.
+- No mask, OCR-thread, JPEG-size, camera or recognition-policy changes were
+  made. Verification sent no gate commands or notifications. HTTPS remains
+  optional; local synthetic browser checks use plain HTTP.
+- These are browser viewport checks, not proof of physical legacy WebKit.
+  Reload the existing wall-screen tabs to load the new assets and observe
+  them on the physical iPad/Pi during ordinary use.
 
 ## Design-review verification — 2026-09-29
 

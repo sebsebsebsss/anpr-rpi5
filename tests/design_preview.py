@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare both interface designs using synthetic, read-only local fixtures.
+"""Preview the selected wall-screen interface with read-only synthetic fixtures.
 
 Run: python3 tests/design_preview.py [--port 8765]
 Open: http://127.0.0.1:8765/
@@ -44,10 +44,10 @@ p{color:#a8b3a2}small{color:#b6e2a6;letter-spacing:.08em}section{display:grid;gr
 article{background:#1b241b;border:1px solid #344233;padding:25px;border-radius:14px}h2{font-size:19px;margin:0 0 10px}
 a{color:#bdedaa}article>a:first-of-type{display:inline-block;padding:10px 15px;border-radius:7px;background:#b6e2a6;color:#173013;font-weight:600;text-decoration:none}
 .secondary{margin-left:12px;font-size:13px}.note{font-size:13px}@media(max-width:620px){main{margin:25px auto;padding:22px}section{grid-template-columns:1fr}h1{font-size:30px}}
-</style></head><body><main><small>LOCAL DESIGN PREVIEW</small><h1>Two directions for your gate screens.</h1>
-<p>Compare the tightened existing interface with the alternative layout. Resize your browser to explore phone, tablet and desktop views.</p>
-<section><article><h2>Tighten what is there</h2><p>The actual working frontend, with compact status pills, responsive layouts and clearer statistics.</p><a href="/current">Open Home</a><a class="secondary" href="/current#stats">Open Stats</a></article>
-<article><h2>A different visual direction</h2><p>A quieter interface, purpose-built phone navigation and interactive activity charts.</p><a href="/alternative">Open alternative</a></article></section>
+</style></head><body><main><small>LOCAL DESIGN PREVIEW</small><h1>The wall screens come first.</h1>
+<p>The tightened existing interface preserves the large gate button and single-screen layouts. Resize your browser to check the dedicated displays and the separate phone layout.</p>
+<section><article><h2>iPad homepage</h2><p>Camera, large gate control and recent sightings together, with status pills and expandable details.</p><a href="/current">Open Home</a><a class="secondary" href="/current#stats">Open Stats</a></article>
+<article><h2>Pi touchscreen</h2><p>The fullscreen page uses the available screen area and keeps the gate control easy to tap.</p><a href="/fullscreen">Open fullscreen</a></article></section>
 <p class="note">All data and camera illustrations are synthetic. There is no live connection. Gate buttons cannot operate hardware, and all writes are blocked. Plain HTTP is sufficient.</p>
 <p class="note">Stop the preview with Ctrl+C in the terminal.</p></main></body></html>"""
 
@@ -278,8 +278,9 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.send_content(LANDING)
         elif path == "/alternative":
             self.send_content(ALTERNATIVE.read_bytes())
-        elif path in {"/current", "/stats"}:
-            html = (STATIC / "index.html").read_text().replace("__GATE_API_SHARED_SECRET__", "synthetic-preview-secret")
+        elif path in {"/current", "/stats", "/fullscreen"}:
+            template = "fullscreen.html" if path == "/fullscreen" else "index.html"
+            html = (STATIC / template).read_text().replace("__GATE_API_SHARED_SECRET__", "synthetic-preview-secret")
             html = html.replace("Gate ANPR 🚪", 'Gate <span class="design-demo-label">DEMO</span>')
             html = html.replace("<title>Gate ANPR</title>", "<title>Gate — synthetic design preview</title>")
             html = html.replace("</head>", PREVIEW_INJECTION + "</head>")

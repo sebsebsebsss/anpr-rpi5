@@ -1125,6 +1125,7 @@ function setActiveTab(target, { updateHash = true } = {}) {
   if (target === "plates") {
     target = "candidates";
   }
+  document.body.classList.toggle("home-active", target === "home");
   const tabs = document.querySelectorAll(".tab[data-tab]");
   const panels = document.querySelectorAll(".tab-panel");
   tabs.forEach((btn) => {

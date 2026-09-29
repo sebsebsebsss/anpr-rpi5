@@ -42,7 +42,7 @@ function setup({ abortAvailable = true } = {}) {
   const fields = [nodes["save-plates"], nodes["add-plate"], node("owner-input")];
   const document = {
     hidden: false, listeners: {},
-    body: { classList: { contains: () => false } },
+    body: node("body"),
     getElementById: (id) => nodes[id] || null,
     querySelector: () => null,
     querySelectorAll(selector) {

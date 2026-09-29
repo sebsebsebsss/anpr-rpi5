@@ -23,6 +23,14 @@ IPAD_UA = (
     "Mozilla/5.0 (iPad; CPU OS 12_5_8 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/12.1.2 Mobile/15E148 Safari/604.1"
 )
+# Primary screens are appliances, not scrolling dashboards. These minima are
+# larger than the deployed dcec8ae button bounds measured with the same fixture.
+WALL_BUTTON_MINIMA = {
+    (1024, 748, "/"): (216, 499),
+    (800, 480, "/fullscreen"): (195, 342),
+    (1024, 600, "/fullscreen"): (256, 462),
+    (1280, 800, "/fullscreen"): (326, 662),
+}
 
 
 def require(condition, label):
@@ -43,6 +51,7 @@ def main():
         "api_error": False,
         "service_inactive": False,
         "decisions_available": True,
+        "unfamiliar": True,
         "legacy_layout": False,
         "save": "validation",
         "plates": [{"owner": "Example household", "plates": ["TEST123"]}],
@@ -118,7 +127,7 @@ def main():
                         "beanstalkd": "active",
                     },
                     "recognised": [event(2, "TEST123", "recognised"), event(1, "DEMO456", "recognised")],
-                    "unfamiliar": [event(3, "NEW789", "unmatched")],
+                    "unfamiliar": [event(3, "NEW789", "unmatched")] if fixture["unfamiliar"] else [],
                     "recent_decisions": [event(3, "NEW789", "unmatched")],
                     "decisions_available": fixture["decisions_available"],
                 }
@@ -144,6 +153,18 @@ def main():
             "/api/gate-cooldown": {"remaining": 0},
             "/api/gate-last-open": {"last_open_ts": None},
             "/api/allowlist-status": [],
+            "/api/stats": {
+                "window": "24h",
+                "counts": {"recognised": 10, "unmatched": 2, "manual_open": 1},
+                "timeseries": {
+                    "bucket": "hour",
+                    "start": "2026-09-28T10:00:00",
+                    "end": "2026-09-29T10:00:00",
+                    "buckets": [],
+                },
+            },
+            "/api/service-health": {},
+            "/api/stats/insights": {"insights": {}},
         }
         if path in apis:
             route.fulfill(json=apis[path])
@@ -170,23 +191,71 @@ def main():
         page = context.new_page()
         page.on("pageerror", lambda error: counters.__setitem__("page_errors", counters["page_errors"] + 1))
         page.set_default_timeout(15000)
+        wall_measurements = []
 
         def ready():
             page.wait_for_function("document.getElementById('tablet-stream-status').textContent === 'View updating'")
-            page.locator("#home-unfamiliar").wait_for(state="visible")
+            page.locator("#home-unfamiliar").wait_for(state="visible" if fixture["unfamiliar"] else "hidden")
             require(
                 page.locator("#tablet-timeline-list .tablet-timeline-row").count() == 2, "recognised arrivals missing"
             )
 
+        def wall_geometry():
+            return page.evaluate("""() => {
+              const rect = selector => {
+                const element = document.querySelector(selector);
+                const box = element.getBoundingClientRect();
+                return {x: box.x, y: box.y, width: box.width, height: box.height, bottom: box.bottom};
+              };
+              const panels = Array.from(document.querySelectorAll(
+                '#tab-home, .tablet-grid, .tablet-grid > .card, .tablet-timeline-list'
+              ));
+              const contents = Array.from(document.querySelectorAll(
+                '.tablet-grid > .card > *, .tablet-timeline-row, .home-health'
+              )).filter(element => element.getClientRects().length);
+              return {
+                documentHeight: document.documentElement.scrollHeight,
+                viewportHeight: innerHeight,
+                scrollY,
+                button: rect('#open-gate-tablet'),
+                camera: rect('#tablet-stream-frame'),
+                panelsFit: panels.every(element => {
+                  const box = element.getBoundingClientRect();
+                  const style = getComputedStyle(element);
+                  return box.top >= 0 && box.bottom <= innerHeight + 1 &&
+                    element.scrollHeight <= element.clientHeight + 1 &&
+                    element.scrollWidth <= element.clientWidth + 1 &&
+                    !['hidden', 'clip', 'scroll', 'auto'].includes(style.overflowY);
+                }),
+                contentsFit: contents.every(element => {
+                  const box = element.getBoundingClientRect();
+                  const card = element.closest('.card').getBoundingClientRect();
+                  return box.top >= card.top && box.bottom <= card.bottom + 1 &&
+                    box.left >= card.left - 1 && box.right <= card.right + 1;
+                }),
+              };
+            }""")
+
+        def check_wall_layout():
+            size = page.viewport_size
+            path = urlsplit(page.url).path
+            if path != "/fullscreen" and size["width"] < 900:
+                return None
+            geometry = wall_geometry()
+            require(geometry["documentHeight"] <= geometry["viewportHeight"], "wall Home document must not scroll")
+            require(geometry["scrollY"] == 0, "wall Home must remain at the top of its viewport")
+            require(geometry["panelsFit"], "wall panels must fit without scrolling or hiding overflow")
+            require(geometry["contentsFit"], "wall content extends outside its card")
+            minimum = WALL_BUTTON_MINIMA.get((size["width"], size["height"], path))
+            if minimum:
+                require(geometry["button"]["width"] >= minimum[0], "wall gate target became narrower")
+                require(geometry["button"]["height"] >= minimum[1], "wall gate target became shorter")
+            return geometry
+
         def screenshot(name):
             require(page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "horizontal overflow")
-            if page.url.endswith("/fullscreen") or page.viewport_size["width"] >= 900:
-                require(
-                    page.evaluate(
-                        "document.querySelector('.tablet-grid').getBoundingClientRect().bottom <= innerHeight"
-                    ),
-                    "tablet controls or arrivals below viewport",
-                )
+            if urlsplit(page.url).path in {"/", "/fullscreen"}:
+                check_wall_layout()
             if args.output_dir:
                 args.output_dir.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(args.output_dir / name), full_page=True)
@@ -243,9 +312,33 @@ def main():
             page.set_viewport_size({"width": width, "height": height})
             page.goto("http://gate.test" + path, wait_until="domcontentloaded")
             ready()
+            page.evaluate("document.fonts.ready")
             for theme in ("light", "dark"):
                 page.evaluate("theme => document.body.classList.toggle('theme-dark', theme === 'dark')", theme)
                 screenshot("home-" + name + "-" + theme + ".png")
+            geometry = check_wall_layout()
+            if geometry:
+                wall_measurements.append({"viewport": [width, height], "path": path, **geometry})
+                for selector, disclosure in (
+                    (".home-health-details summary", "#tablet-system-status"),
+                    ("#home-decision summary", "#home-decision .decision-note"),
+                ):
+                    page.locator(selector).click()
+                    box = page.locator(disclosure).bounding_box()
+                    require(
+                        box is not None and box["y"] >= 0 and box["y"] + box["height"] <= height,
+                        "wall diagnostics must open inside the viewport",
+                    )
+                    expanded = check_wall_layout()
+                    require(
+                        expanded["camera"] == geometry["camera"] and expanded["button"] == geometry["button"],
+                        "diagnostics must overlay without moving the camera or gate target",
+                    )
+                    page.locator(selector).click()
+                fixture["unfamiliar"] = False
+                page.evaluate("state.homeStatus.unfamiliar = []; renderHomeArrivals()")
+                screenshot("home-" + name + "-usual.png")
+                fixture["unfamiliar"] = True
             require(
                 page.locator("#open-gate-tablet").bounding_box()["y"]
                 + page.locator("#open-gate-tablet").bounding_box()["height"]
@@ -269,6 +362,23 @@ def main():
             )
             screenshot("home-legacy-layout-" + str(width) + ".png")
         fixture["legacy_layout"] = False
+        # Home's viewport contract must not constrain other tabs. Returning
+        # after scrolling Stats must restore a genuinely unscrolled Home.
+        page.set_viewport_size({"width": 1024, "height": 748})
+        page.goto("http://gate.test/", wait_until="domcontentloaded")
+        ready()
+        page.locator(".tab[data-tab=stats]").click()
+        page.wait_for_function("document.getElementById('stat-recognised').textContent === '10'")
+        require(
+            not page.locator("body").evaluate("body => body.classList.contains('home-active')"),
+            "Home viewport sizing leaked into Stats",
+        )
+        page.locator("#tab-stats details").first.click()
+        page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+        require(page.evaluate("scrollY > 0"), "Stats must remain scrollable")
+        page.locator(".brand").click()
+        ready()
+        check_wall_layout()
         page.set_viewport_size({"width": 390, "height": 844})
 
         page.goto("http://gate.test/admin", wait_until="domcontentloaded")
@@ -293,7 +403,7 @@ def main():
         counters == {"blocked_gate_requests": 0, "unexpected_requests": 0, "page_errors": 0},
         "unexpected browser request/error",
     )
-    print(json.dumps({"ok": True, "mocked_checks": 24, **counters}))
+    print(json.dumps({"ok": True, "wall_layouts": wall_measurements, **counters}))
 
 
 if __name__ == "__main__":
