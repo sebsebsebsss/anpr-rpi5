@@ -294,6 +294,7 @@
   no_log: true
   tags:
     - deploy
+    - web
 
 - name: Use persisted secret for smoke checks
   set_fact:
@@ -301,6 +302,7 @@
   no_log: true
   tags:
     - deploy
+    - web
 
 - name: Check for local allowlist file
   stat:
