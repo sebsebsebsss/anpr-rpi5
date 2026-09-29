@@ -1490,7 +1490,7 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
       state.gateOpenInFlight = false;
       if (!gateBtn.dataset.cooldown) {
         gateBtn.disabled = false;
-        gateBtn.textContent = "Open the gate";
+        gateBtn.textContent = "Open Sesame!";
         if (!failed) {
           setGateStatus(gateStatus, "ready", "Gate ready");
           setGateButtonState(gateBtn, "ready");
@@ -1516,7 +1516,7 @@ function startCooldownCountdown(seconds, { gateBtn, gateStatus, cooldownEl, erro
     if (remaining < 0) {
       gateBtn.dataset.cooldown = "";
       gateBtn.disabled = false;
-      gateBtn.textContent = "Open the gate";
+      gateBtn.textContent = "Open Sesame!";
       setGateStatus(gateStatus, "ready", "Gate ready");
       setGateButtonState(gateBtn, "ready");
       if (cooldownEl) cooldownEl.textContent = "Opening the gate: --";
