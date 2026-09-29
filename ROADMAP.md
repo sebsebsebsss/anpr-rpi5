@@ -117,6 +117,22 @@ output setting alone cannot create additional source frames.
 Each new completion should record its commit, automated checks, deployed checks,
 and remaining physical-device or real-vehicle verification here.
 
+## Source freshness label correction — 2026-09-29
+
+Home's source counter incorrectly added time since the five-second health poll
+onto the JPEG age sampled by that poll, even as newer JPEGs kept arriving.
+It now shows sampled fresh/stale status. Expanded details report the JPEG age
+**when checked** and separately the time since that check. API failures and
+expired snapshots remain unknown, and repeated image downloads cannot override
+a genuinely stale producer. No extra polling or image-processing work is added.
+Regression checks cover poll gaps, stale samples, expiry and differing clocks;
+wall-layout checks retain the existing touch targets and non-scrolling views.
+All six JavaScript suites and responsive browser checks passed. A JavaScript-only
+Ansible deployment preserved configuration and all six service process IDs.
+Live read-only checks at 1024×680 and 800×480 observed sampled JPEG ages no more
+than 0.115s while check ages reached 4.55s; the pill stayed fresh and both the
+page and expanded diagnostics fitted their viewports. No gate commands were sent.
+
 ## Safari viewport and JPEG profiles — 2026-09-29
 
 The actual iPad exposed a Safari summary-layout quirk and a smaller visible

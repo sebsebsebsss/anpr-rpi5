@@ -1768,8 +1768,10 @@ function renderHomeStatus() {
   const current = homeStatusIsCurrent();
   const now = homeServerNow();
   const stream = snapshot && snapshot.stream || {};
-  const sourceAge = Number.isFinite(stream.age_seconds) && now !== null
-    ? stream.age_seconds + Math.max(0, now - snapshot.server_time) : null;
+  // This is the JPEG age observed by the last status poll, not the age of
+  // the currently displayed image. The producer can replace it between polls.
+  const sourceAge = Number.isFinite(stream.age_seconds) && stream.age_seconds >= 0
+    ? stream.age_seconds : null;
   const threshold = Number.isFinite(stream.stale_after_seconds) ? stream.stale_after_seconds : 15;
   let label = "View updating";
   let kind = "ok";
@@ -1803,7 +1805,7 @@ function renderHomeStatus() {
     sourcePill.hidden = !state.homeSourceIsLocal;
     const sourceKnown = current && sourceAge !== null;
     const sourceFresh = sourceKnown && stream.fresh && sourceAge <= threshold;
-    sourcePill.textContent = sourceKnown ? `Pi frame ${Math.floor(sourceAge)}s` : "Source unknown";
+    sourcePill.textContent = sourceKnown ? sourceFresh ? "Pi frame fresh" : "Pi frame stale" : "Source unknown";
     sourcePill.className = `live-badge status-${sourceKnown ? sourceFresh ? "neutral" : "bad" : "unknown"}`;
   }
   const servicePill = document.getElementById("tablet-service-status");
@@ -1815,7 +1817,11 @@ function renderHomeStatus() {
   if (system) {
     const parts = [frameAge === null ? "No image loaded" : `Image loaded ${Math.floor(frameAge / 1000)}s ago`];
     if (state.homeSourceIsLocal) {
-      parts.push(current && sourceAge !== null ? `Pi frame ${Math.floor(sourceAge)}s old` : "Pi frame status unavailable");
+      const checkedAgo = state.homeStatusReceivedAt === null ? null
+        : Math.floor(Math.max(0, Date.now() - state.homeStatusReceivedAt) / 1000);
+      parts.push(current && sourceAge !== null
+        ? `Pi JPEG was ${sourceAge.toFixed(1)}s old when checked ${checkedAgo}s ago`
+        : "Pi frame status unavailable");
     }
     if (!servicesCurrent) {
       parts.push("Service status unavailable");

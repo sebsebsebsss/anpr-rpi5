@@ -175,7 +175,7 @@ function checkFrameTruth() {
   image.onload();
   test.app.renderHomeStatus();
   assert(label() === "View updating", "A loaded image and fresh source should show an updating view");
-  assert(test.nodes["tablet-source-status"].textContent === "Pi frame 1s", "Source age belongs in its own pill");
+  assert(test.nodes["tablet-source-status"].textContent === "Pi frame fresh", "Source freshness belongs in its own pill");
   assert(test.nodes["tablet-service-status"].textContent === "Services active", "Service activity belongs in its own pill");
   test.advance(200);
   image.onerror();
@@ -202,6 +202,49 @@ function checkFrameTruth() {
   applySnapshot(test, snapshot({ services_checked_at: 1899999900 }));
   test.app.renderHomeStatus();
   assert(test.nodes["tablet-system-status"].textContent.includes("Service status unavailable"), "An old active-service snapshot cannot be reported as current");
+}
+
+function checkSampledSourceAge() {
+  const test = setup();
+  const image = test.app.createLegacyStreamImage("/static/stream.jpg");
+  test.app.state.homeFrame = image.gateFrameState;
+  applySnapshot(test, snapshot({ stream: { age_seconds: 0.08, fresh: true, stale_after_seconds: 15 } }));
+  image.onload();
+  for (let index = 0; index < 20; index++) {
+    test.advance(200);
+    image.onload();
+  }
+  test.app.renderHomeStatus();
+  const pill = () => test.nodes["tablet-source-status"].textContent;
+  const detail = () => test.nodes["tablet-system-status"].textContent;
+  assert(pill() === "Pi frame fresh", "A recent source sample must not become an invented ticking frame age");
+  assert(detail().includes("Pi JPEG was 0.1s old when checked 4s ago"), "Separate sampled JPEG age from check age, without comparing Pi and client clocks");
+
+  applySnapshot(test, snapshot({ stream: { age_seconds: 14, fresh: true, stale_after_seconds: 15 } }));
+  test.advance(4000);
+  image.onload();
+  test.app.renderHomeStatus();
+  assert(pill() === "Pi frame fresh", "Elapsed polling time cannot prove that the latest producer frame is stale");
+
+  applySnapshot(test, snapshot({ stream: { age_seconds: 16, fresh: false, stale_after_seconds: 15 } }));
+  test.advance(200);
+  image.onload();
+  test.app.renderHomeStatus();
+  assert(pill() === "Pi frame stale", "Repeated successful downloads cannot override a stale publisher sample");
+  assert(test.nodes["tablet-stream-status"].textContent === "Source stale", "A genuine stale sample must still flag the main status");
+
+  applySnapshot(test);
+  for (let index = 0; index < 101; index++) {
+    test.advance(200);
+    image.onload();
+  }
+  test.app.renderHomeStatus();
+  assert(pill() === "Source unknown", "An expired sample cannot continue claiming freshness");
+  assert(detail().includes("Pi frame status unavailable"), "Expired source observations must not be presented as current");
+  applySnapshot(test);
+  test.app.state.homeStatusError = true;
+  test.app.renderHomeStatus();
+  assert(pill() === "Source unknown", "A failed check must turn source freshness unknown");
 }
 
 function checkDisplayDiagnostics() {
@@ -392,6 +435,7 @@ async function checkPlateDeadlines() {
 async function run() {
   checkViewportSizing();
   checkFrameTruth();
+  checkSampledSourceAge();
   checkDisplayDiagnostics();
   checkArrivalExpiryAndDecisions();
   await checkHomePolling();
