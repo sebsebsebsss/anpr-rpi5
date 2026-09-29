@@ -14,7 +14,7 @@ from time import gmtime, strftime
 import greenstalk
 import requests
 from allowlist_util import normalise_plate
-from gate_runtime import configure_logging, env_int, init_events_db, insert_event, open_gate
+from gate_runtime import GateActuationError, configure_logging, env_int, init_events_db, insert_event, open_gate
 
 _SAFE_UUID = re.compile(r"^[A-Za-z0-9\-]+$")
 
@@ -444,12 +444,8 @@ def consumer_main(client):
                     not_recently_seen = now > (last_match + MATCH_DEDUP_SECONDS)
 
                     if allowed and not_recently_seen:
-                        last_seen_time = now
-                        last_seen_reg = match_plate
                         owner = allowlist_map.get(match_plate, "")
                         display_plate = allowlist_display_map.get(match_plate, match_plate)
-                        _mark_recent_plate_keys(last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now)
-                        matched = True
                         if fuzzy_match:
                             log.info(
                                 "Fuzzy allowlist match: %s -> %s (dist=%s). Opening gate",
@@ -460,7 +456,21 @@ def consumer_main(client):
                         else:
                             log.info("Plate %s recognised. Opening gate", display_plate)
 
-                        open_gate(gatePin, gatePin_bcm, log)
+                        try:
+                            open_gate(gatePin, gatePin_bcm, log)
+                        except GateActuationError as exc:
+                            if exc.may_have_activated:
+                                # A failed write/cleanup may follow a real pulse.
+                                # Suppress a second attempt, but leave failures
+                                # before activation eligible for the job retry.
+                                _mark_recent_plate_keys(
+                                    last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now
+                                )
+                            raise
+                        last_seen_time = now
+                        last_seen_reg = match_plate
+                        _mark_recent_plate_keys(last_seen_allowed, [match_plate, norm_plate] + candidate_keys, now)
+                        matched = True
 
                         jpg_path = "/home/pi/plates/%s.jpg" % uuid if uuid else ""
                         log.debug("Sending pushover with image %s", jpg_path)

@@ -102,10 +102,24 @@
           <p class="legend">
             Recognised = allowlist match. Unmatched = capture with no allowlist hit.
             Events are grouped into 60s
-            windows so a single vehicle shows together.
+            windows within each page. Tap a capture to open the full-size image.
           </p>
+          <div id="history-controls" class="history-controls">
+            <label for="history-window">Show captures from</label>
+            <select id="history-window">
+              <option value="24h">Last 24 hours</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d" selected>Last 30 days</option>
+              <option value="all">All retained history</option>
+            </select>
+            <button id="history-refresh" class="btn btn-ghost" type="button">Latest captures</button>
+          </div>
           <div id="events-list" class="feed"></div>
-          <div id="events-more" class="feed-status">Scroll for more</div>
+          <nav class="history-pagination" aria-label="History pages">
+            <button id="history-prev" class="btn btn-secondary" type="button" disabled>Newer</button>
+            <div id="events-more" class="feed-status" aria-live="polite">Loading history…</div>
+            <button id="history-next" class="btn btn-secondary" type="button" disabled>Older</button>
+          </nav>
         </div>
       </section>
 

@@ -181,3 +181,74 @@ def test_pushover_uses_registered_plate_not_observed_ocr(monkeypatch):
     assert records[0]["plate"] == "5X38PN"
     assert records[0]["observed_plate"] == "9X3BPN"
     assert notifications == [("Owner", "SX3BPN", "/home/pi/plates/frame-1.jpg")]
+
+
+@pytest.mark.parametrize("may_have_activated", [False, True])
+def test_gpio_failure_retries_only_when_activation_did_not_start(monkeypatch, may_have_activated):
+    import new_gate_anpr
+
+    attempts = []
+    records = []
+    released = []
+    cache_at_release = []
+
+    def open_gate(*args):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise new_gate_anpr.GateActuationError("GPIO failure", may_have_activated=may_have_activated)
+        return True
+
+    monkeypatch.setattr(new_gate_anpr.greenstalk, "TimedOutError", TimeoutError, raising=False)
+    monkeypatch.setattr(new_gate_anpr, "_maybe_reload_allowlist", lambda: None)
+    monkeypatch.setattr(new_gate_anpr, "open_gate", open_gate)
+    monkeypatch.setattr(new_gate_anpr, "_record_event", lambda **kwargs: records.append(kwargs))
+    monkeypatch.setattr(new_gate_anpr.time, "time", lambda: 1000)
+    monkeypatch.setattr(new_gate_anpr, "list_of_plates", [("QQ17VVV", "Owner")])
+    monkeypatch.setattr(new_gate_anpr, "last_seen_allowed", {})
+    monkeypatch.setattr(new_gate_anpr, "last_seen_unmatched", {})
+    monkeypatch.setattr(new_gate_anpr, "PUSHOVER_ENABLED", False)
+    job = _FakeJob("job-1", _payload("frame-1", "QQ17VVV", 95))
+    client = _FakeClient([job, job])
+
+    def release(job, delay):
+        released.append(job.id)
+        cache_at_release.append(dict(new_gate_anpr.last_seen_allowed))
+
+    client.release = release
+    with pytest.raises(KeyboardInterrupt):
+        new_gate_anpr.consumer_main(client)
+
+    assert released == ["job-1"]
+    assert client.deleted == ["job-1"]
+    assert len(attempts) == (1 if may_have_activated else 2)
+    assert bool(cache_at_release[0]) is may_have_activated
+    assert len(records) == (0 if may_have_activated else 1)
+
+
+def test_event_failure_after_success_does_not_repeat_pulse(monkeypatch):
+    import new_gate_anpr
+
+    attempts = []
+    released = []
+
+    def fail_record(**kwargs):
+        raise OSError("database unavailable after GPIO succeeded")
+
+    monkeypatch.setattr(new_gate_anpr.greenstalk, "TimedOutError", TimeoutError, raising=False)
+    monkeypatch.setattr(new_gate_anpr, "_maybe_reload_allowlist", lambda: None)
+    monkeypatch.setattr(new_gate_anpr, "open_gate", lambda *args: attempts.append(args))
+    monkeypatch.setattr(new_gate_anpr, "_record_event", fail_record)
+    monkeypatch.setattr(new_gate_anpr.time, "time", lambda: 1000)
+    monkeypatch.setattr(new_gate_anpr, "list_of_plates", [("QQ17VVV", "Owner")])
+    monkeypatch.setattr(new_gate_anpr, "last_seen_allowed", {})
+    monkeypatch.setattr(new_gate_anpr, "last_seen_unmatched", {})
+    monkeypatch.setattr(new_gate_anpr, "PUSHOVER_ENABLED", False)
+    job = _FakeJob("job-1", _payload("frame-1", "QQ17VVV", 95))
+    client = _FakeClient([job, job])
+    client.release = lambda job, delay: released.append(job.id)
+    with pytest.raises(KeyboardInterrupt):
+        new_gate_anpr.consumer_main(client)
+
+    assert released == ["job-1"]
+    assert client.deleted == ["job-1"]
+    assert len(attempts) == 1

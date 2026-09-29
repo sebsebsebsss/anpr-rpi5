@@ -36,7 +36,12 @@
     gate_api_shared_secret: "{{ lookup('env', 'GATE_API_SHARED_SECRET') | default('', true) }}"
     gate_web_stream_encoder: "{{ lookup('env', 'GATE_WEB_STREAM_ENCODER') | default('libx264', true) }}"
     gate_web_stream_hls_dir: "{{ app_dir }}/web/static/hls"
-    gate_web_stream_jpeg: "{{ app_dir }}/web/static/stream.jpg"
+    gate_web_stream_jpeg: "{{ lookup('env', 'GATE_WEB_STREAM_JPEG') | default('/run/gate-anpr/stream.jpg', true) }}"
+    gate_backup_dir: /var/backups/gate-anpr
+    gate_backup_keep: 7
+    gate_backup_database: false
+    gate_replace_env: false
+    gate_stream_overrides: {}
 
     gatepi_alias_hostname: "{{ lookup('env', 'GATEPI_ALIAS_HOSTNAME') | default('gate', true) }}"
     run_openalpr_smoketest: false

@@ -81,6 +81,30 @@
   tags:
     - deploy
 
+- name: Copy backup helper before deployment changes
+  copy:
+    src: files/gate_backup.py
+    dest: /usr/local/bin/gate_anpr_backup.py
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - deploy
+
+- name: Check for existing configuration before deployment backup
+  stat:
+    path: /etc/gate_anpr.env
+  register: gate_backup_source
+  tags:
+    - deploy
+
+- name: Back up existing configuration before deployment
+  command:
+    argv: "{{ ['/usr/bin/python3', '/usr/local/bin/gate_anpr_backup.py', '--destination', gate_backup_dir, '--keep', gate_backup_keep | string] + (['--include-database'] if gate_backup_database | bool else []) }}"
+  when: gate_backup_source.stat.exists
+  tags:
+    - deploy
+
 - name: Ensure events database exists
   file:
     path: "{{ app_dir }}/events.db"
@@ -223,7 +247,9 @@
     gate_web_stream_fps: "{{ lookup('ini', 'GATE_WEB_STREAM_FPS type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_fps) }}"
     gate_web_stream_width: "{{ lookup('ini', 'GATE_WEB_STREAM_WIDTH type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_width) }}"
     gate_web_stream_height: "{{ lookup('ini', 'GATE_WEB_STREAM_HEIGHT type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_height) }}"
+    gate_web_stream_jpeg: "{{ lookup('ini', 'GATE_WEB_STREAM_JPEG type=properties file=' ~ gate_anpr_env_path, default=gate_web_stream_jpeg) }}"
   when: gate_anpr_env.stat.exists
+  no_log: true
   tags:
     - deploy
 
@@ -239,14 +265,16 @@
   tags:
     - deploy
 
-- name: Install gate_anpr env file (if present)
+- name: Seed gate_anpr env file (preserve existing Pi configuration unless explicitly replaced)
   copy:
     src: "{{ gate_anpr_env_path }}"
     dest: /etc/gate_anpr.env
     owner: root
     group: root
     mode: "0600"
+    force: "{{ gate_replace_env | bool }}"
   when: gate_anpr_env.stat.exists
+  no_log: true
   notify:
     - restart gate_anpr
     - restart gate_anpr_web
@@ -269,7 +297,7 @@
   shell: |
     set -eu
     if ! grep -q '^GATE_API_SHARED_SECRET=.\+' /etc/gate_anpr.env; then
-      SECRET="{{ pre_copy_secret.stdout | default('') | trim }}"
+      SECRET="${GATE_PREVIOUS_API_SECRET}"
       if [ -z "$SECRET" ]; then
         SECRET=$(openssl rand -hex 32)
       fi
@@ -279,6 +307,8 @@
       echo "present"
     fi
   register: secret_ensure
+  environment:
+    GATE_PREVIOUS_API_SECRET: "{{ pre_copy_secret.stdout | default('') | trim }}"
   changed_when: secret_ensure.stdout is search("written")
   no_log: true
   notify:
@@ -300,6 +330,97 @@
   set_fact:
     gate_api_shared_secret: "{{ remote_secret.stdout | trim }}"
   no_log: true
+  tags:
+    - deploy
+    - web
+
+- name: Validate explicit stream override keys
+  assert:
+    that:
+      - gate_stream_overrides is mapping
+      - "gate_stream_overrides.keys() | difference(['GATE_WEB_STREAM_WIDTH', 'GATE_WEB_STREAM_HEIGHT', 'GATE_WEB_STREAM_FPS']) | length == 0"
+    fail_msg: "gate_stream_overrides only accepts JPEG preview width, height and FPS."
+  tags:
+    - deploy
+
+- name: Validate explicit stream override values
+  assert:
+    that:
+      - "item.value | string is match('^[0-9]+(\\.[0-9]+)?$' if item.key == 'GATE_WEB_STREAM_FPS' else '^[1-9][0-9]*$')"
+      - item.value | float > 0
+    fail_msg: "Stream dimensions must be positive integers and FPS a positive number."
+  loop: "{{ gate_stream_overrides | dict2items }}"
+  tags:
+    - deploy
+
+- name: Apply explicit stream tuning without replacing other Pi configuration
+  lineinfile:
+    path: /etc/gate_anpr.env
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ gate_stream_overrides | dict2items }}"
+  no_log: true
+  notify:
+    - restart gate_anpr_web
+    - restart gate_anpr_stream_jpeg
+  tags:
+    - deploy
+
+- name: Read persisted web stream configuration
+  command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import json
+        values = {}
+        with open('/etc/gate_anpr.env', encoding='utf-8') as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                values[key.strip()] = value
+        print(json.dumps(values))
+  register: persisted_gate_env
+  changed_when: false
+  no_log: true
+  tags:
+    - deploy
+    - web
+
+- name: Use persisted Pi stream settings
+  set_fact:
+    gate_web_port: "{{ (persisted_gate_env.stdout | from_json).get('GATE_WEB_PORT', gate_web_port) }}"
+    gate_web_stream_url: "{{ (persisted_gate_env.stdout | from_json).get('GATE_WEB_STREAM_URL', gate_web_stream_url) }}"
+    gate_web_stream_rtsp_url: "{{ (persisted_gate_env.stdout | from_json).get('GATE_WEB_STREAM_RTSP_URL', gate_web_stream_rtsp_url) }}"
+    gate_web_stream_fps: "{{ (persisted_gate_env.stdout | from_json).get('GATE_WEB_STREAM_FPS', gate_web_stream_fps) }}"
+    gate_web_stream_width: "{{ (persisted_gate_env.stdout | from_json).get('GATE_WEB_STREAM_WIDTH', gate_web_stream_width) }}"
+    gate_web_stream_height: "{{ (persisted_gate_env.stdout | from_json).get('GATE_WEB_STREAM_HEIGHT', gate_web_stream_height) }}"
+    gate_web_stream_jpeg: "{{ (persisted_gate_env.stdout | from_json).get('GATE_WEB_STREAM_JPEG', gate_web_stream_jpeg) }}"
+  no_log: true
+  tags:
+    - deploy
+    - web
+
+- name: Persist shared live JPEG path
+  lineinfile:
+    path: /etc/gate_anpr.env
+    regexp: '^GATE_WEB_STREAM_JPEG='
+    line: "GATE_WEB_STREAM_JPEG={{ gate_web_stream_jpeg }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify:
+    - restart gate_anpr_web
+    - restart gate_anpr_stream_jpeg
   tags:
     - deploy
     - web
@@ -401,6 +522,58 @@
   tags:
     - deploy
 
+- name: Create protected backup directory
+  file:
+    path: "{{ gate_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags:
+    - deploy
+
+- name: Install gate backup service
+  copy:
+    dest: /etc/systemd/system/gate_anpr_backup.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Back up gate configuration
+
+      [Service]
+      Type=oneshot
+      User=root
+      UMask=0077
+      EnvironmentFile=-/etc/gate_anpr.env
+      ExecStart=/usr/bin/python3 /usr/local/bin/gate_anpr_backup.py --destination {{ gate_backup_dir }} --keep {{ gate_backup_keep }}{{ ' --include-database' if gate_backup_database | bool else '' }}
+      Nice=10
+      IOSchedulingClass=idle
+  notify: daemon-reload
+  tags:
+    - deploy
+
+- name: Install daily gate backup timer
+  copy:
+    dest: /etc/systemd/system/gate_anpr_backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Daily gate configuration backup
+
+      [Timer]
+      OnCalendar=*-*-* 03:05:00
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+  notify: daemon-reload
+  tags:
+    - deploy
+
 - name: Install systemd unit for alprd (source-build or override-friendly)
   copy:
     dest: /etc/systemd/system/alprd.service
@@ -494,6 +667,10 @@
       WorkingDirectory={{ app_dir }}/web
       EnvironmentFile=-/etc/gate_anpr.env
       ExecStart={{ venv_path }}/bin/waitress-serve --listen=127.0.0.1:8080 app:app
+      # Waitress catches SIGINT and drains its request threads, allowing an
+      # in-flight relay pulse to finish its finally block before shutdown.
+      KillSignal=SIGINT
+      TimeoutStopSec=15s
       StandardOutput=journal
       StandardError=journal
       SyslogIdentifier=gate_anpr_web
@@ -649,6 +826,18 @@
     group: root
     mode: "0755"
   when: gate_web_stream_rtsp_url | length > 0
+  notify: restart gate_anpr_stream_jpeg
+  tags:
+    - deploy
+
+- name: Ensure live JPEG directory exists
+  file:
+    path: "{{ gate_web_stream_jpeg | dirname }}"
+    state: directory
+    owner: pi
+    group: pi
+    mode: "0755"
+  when: gate_web_stream_rtsp_url | length > 0
   tags:
     - deploy
 
@@ -669,6 +858,9 @@
       Type=simple
       User=pi
       EnvironmentFile=-/etc/gate_anpr.env
+      RuntimeDirectory=gate-anpr
+      RuntimeDirectoryMode=0755
+      RuntimeDirectoryPreserve=yes
       Environment=GATE_WEB_STREAM_RTSP_URL={{ gate_web_stream_rtsp_url }}
       ExecStart=/bin/sh -c 'exec ionice -c2 -n7 nice -n 10 /usr/bin/ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay -analyzeduration 0 -probesize 32k -max_delay 0 -rtsp_transport tcp -i ${GATE_WEB_STREAM_RTSP_URL} -an -vf scale=${GATE_WEB_STREAM_WIDTH}:${GATE_WEB_STREAM_HEIGHT} -r ${GATE_WEB_STREAM_FPS} -q:v 7 -f image2pipe -vcodec mjpeg - | /usr/bin/python3 /usr/local/bin/gate_anpr_stream_writer.py {{ gate_web_stream_jpeg }}'
       Restart=always
@@ -677,7 +869,9 @@
       [Install]
       WantedBy=multi-user.target
   when: gate_web_stream_rtsp_url | length > 0
-  notify: daemon-reload
+  notify:
+    - daemon-reload
+    - restart gate_anpr_stream_jpeg
   tags:
     - deploy
 
@@ -730,6 +924,14 @@
     - deploy
     - web
 
+- name: Enable daily backups
+  systemd:
+    name: gate_anpr_backup.timer
+    enabled: true
+    state: started
+  tags:
+    - deploy
+
 - name: Wait for web UI port to accept connections
   wait_for:
     host: 127.0.0.1
@@ -761,26 +963,13 @@
     - deploy
     - web
 
-- name: Record maintenance log timestamp before smoke check
-  stat:
-    path: /var/log/gate-anpr/gate-maintenance.log
-  register: gate_maintenance_log_before
-  tags:
-    - deploy
-
 - name: Run maintenance smoke check
   command: >
     {{ venv_path }}/bin/python {{ app_dir }}/gate_maintenance.py
     --db-path {{ app_dir }}/events.db
-    --retention-days 30
+    --retention-days 180 --dry-run
   become_user: pi
-  changed_when: false
-  tags:
-    - deploy
-
-- name: Read maintenance log tail after smoke check
-  command: tail -n 20 /var/log/gate-anpr/gate-maintenance.log
-  register: gate_maintenance_log_tail
+  register: gate_maintenance_smoke
   changed_when: false
   tags:
     - deploy
@@ -788,8 +977,8 @@
 - name: Verify maintenance smoke check logged success
   assert:
     that:
-      - "'Pruned' in gate_maintenance_log_tail.stdout"
-    fail_msg: "Gate maintenance smoke check did not log a prune result."
+      - "'[dry-run] Would prune' in gate_maintenance_smoke.stderr"
+    fail_msg: "Gate maintenance smoke check did not report its dry-run result."
   tags:
     - deploy
 
@@ -802,7 +991,7 @@
     - deploy
 
 - name: Verify Python imports inside venv
-  command: "{{ venv_path }}/bin/python -c \"import requests, greenstalk; import RPi.GPIO\""
+  command: "{{ venv_path }}/bin/python -c \"import requests, greenstalk, lgpio; from PIL import Image\""
   changed_when: false
   tags:
     - deploy

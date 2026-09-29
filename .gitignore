@@ -6,6 +6,9 @@ exports/
 .DS_Store
 .ansible/
 .venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 tmp/
 tests/Test\ Image.png
 *.jpeg

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import fcntl
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -218,35 +220,118 @@ RELAY_ON = 1  # GPIO.HIGH
 RELAY_OFF = 0  # GPIO.LOW
 
 
-def open_gate(board_pin, bcm_pin, logger):
-    logger.debug("GPIO setup: mode=BOARD pin=%s", board_pin)
-    try:
-        import RPi.GPIO as GPIO
+class GateActuationError(RuntimeError):
+    """A failed request, including whether a relay pulse may already have begun."""
 
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BOARD)
-        GPIO.setup(board_pin, GPIO.OUT)
-        try:
-            GPIO.output(board_pin, RELAY_ON)
-            time.sleep(0.5)
-        finally:
-            GPIO.output(board_pin, RELAY_OFF)
-            GPIO.cleanup()
-        return
-    except RuntimeError as exc:
-        logger.warning("RPi.GPIO failed (%s). Falling back to lgpio BCM %s", exc, bcm_pin)
+    def __init__(self, message, *, may_have_activated):
+        super().__init__(message)
+        self.may_have_activated = may_have_activated
 
-    try:
-        import lgpio  # type: ignore
-    except Exception as exc:
-        logger.error("lgpio not available; cannot toggle gate pin: %s", exc)
-        raise
 
-    handle = lgpio.gpiochip_open(0)
+_logged_gpio_config = None
+
+
+def _pulse_lgpio(bcm_pin, chip, before_activate):
+    import lgpio
+
+    handle = lgpio.gpiochip_open(chip)
     try:
         lgpio.gpio_claim_output(handle, bcm_pin, RELAY_OFF)
-        lgpio.gpio_write(handle, bcm_pin, RELAY_ON)
-        time.sleep(0.5)
-        lgpio.gpio_write(handle, bcm_pin, RELAY_OFF)
+        try:
+            before_activate()
+            lgpio.gpio_write(handle, bcm_pin, RELAY_ON)
+            time.sleep(0.5)
+        finally:
+            # Closing a gpiochip does not guarantee a LOW output on Raspberry Pi.
+            # Also runs when the worker's SIGTERM handler raises SystemExit.
+            lgpio.gpio_write(handle, bcm_pin, RELAY_OFF)
     finally:
         lgpio.gpiochip_close(handle)
+
+
+def _pulse_rpi_gpio(board_pin, before_activate):
+    import RPi.GPIO as GPIO
+
+    GPIO.setwarnings(False)
+    GPIO.setmode(GPIO.BOARD)
+    GPIO.setup(board_pin, GPIO.OUT, initial=RELAY_OFF)
+    try:
+        before_activate()
+        GPIO.output(board_pin, RELAY_ON)
+        time.sleep(0.5)
+    finally:
+        try:
+            GPIO.output(board_pin, RELAY_OFF)
+        finally:
+            GPIO.cleanup(board_pin)
+
+
+def open_gate(board_pin, bcm_pin, logger):
+    """Pulse the relay, or return False if another caller just pulsed it.
+
+    Both the web server and ANPR worker take this same process lock. The short
+    shared interval only coalesces overlapping requests; their longer manual
+    cooldown and per-plate deduplication policies remain with the callers.
+    A backend is selected explicitly, never retried after a possible activation.
+    """
+    global _logged_gpio_config
+    activation_started = False
+    try:
+        backend = os.getenv("GATE_GPIO_BACKEND", "lgpio").strip().lower()
+        if backend not in {"lgpio", "rpi_gpio"}:
+            raise ValueError("GATE_GPIO_BACKEND must be lgpio or rpi_gpio")
+        chip = int(os.getenv("GATE_GPIO_CHIP", "0"))
+        if chip < 0:
+            raise ValueError("GATE_GPIO_CHIP must be non-negative")
+        min_interval = float(os.getenv("GATE_GPIO_MIN_INTERVAL_SECONDS", "1.0"))
+        if not math.isfinite(min_interval) or min_interval < 0.5:
+            raise ValueError("GATE_GPIO_MIN_INTERVAL_SECONDS must be at least 0.5")
+        lock_path = os.getenv("GATE_GPIO_LOCK_PATH", "/opt/gate_anpr/gate_gpio.lock")
+
+        with open(lock_path, "a+", encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            handle.seek(0)
+            try:
+                last_state = json.loads(handle.read() or "{}")
+                last_attempt = float(last_state.get("attempted_at", 0))
+                completed = last_state.get("completed", False)
+            except (ValueError, TypeError, AttributeError):
+                last_attempt, completed = 0.0, False
+            now = time.time()
+            if last_attempt > 0 and 0 <= now - last_attempt < min_interval:
+                if not completed:
+                    raise GateActuationError("A recent relay pulse has an uncertain outcome", may_have_activated=True)
+                logger.info("Gate request coalesced with a recent relay pulse")
+                return False
+
+            attempted_at = None
+
+            def save_state(completed):
+                handle.seek(0)
+                handle.truncate()
+                json.dump({"attempted_at": attempted_at, "completed": completed}, handle)
+                handle.flush()
+
+            def before_activate():
+                nonlocal activation_started, attempted_at
+                # Persist the attempt before HIGH so another process does not
+                # immediately repeat a pulse whose outcome is uncertain.
+                attempted_at = time.time()
+                save_state(completed=False)
+                activation_started = True
+
+            config = (backend, chip, board_pin, bcm_pin)
+            if config != _logged_gpio_config:
+                logger.info("Gate GPIO backend=%s chip=%s BOARD=%s BCM=%s", *config)
+                _logged_gpio_config = config
+            if backend == "lgpio":
+                _pulse_lgpio(bcm_pin, chip, before_activate)
+            else:
+                _pulse_rpi_gpio(board_pin, before_activate)
+            save_state(completed=True)
+            return True
+    except GateActuationError:
+        raise
+    except Exception as exc:
+        logger.error("Gate GPIO failed (activation attempted=%s): %s", activation_started, exc)
+        raise GateActuationError(str(exc), may_have_activated=activation_started) from exc

@@ -1269,6 +1269,33 @@ textarea {
   color: var(--muted);
 }
 
+.history-controls,
+.history-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.history-pagination {
+  justify-content: space-between;
+}
+
+.history-controls select {
+  font: inherit;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.event-image[data-preview-src] {
+  min-height: 160px;
+  background: var(--panel);
+}
+
 .empty-state {
   padding: 18px;
   border-radius: 12px;

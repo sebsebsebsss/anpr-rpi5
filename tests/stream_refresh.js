@@ -54,6 +54,9 @@ function setup(options = {}) {
         }
       }, options.delay === undefined ? 800 : options.delay);
     }
+    closest() {
+      return { classList: { contains: () => !options.inactive } };
+    }
     removeAttribute(name) {
       assert(name === "src", "Only the pending image should be cancelled");
       clearTimeout(this.pending);
@@ -62,10 +65,10 @@ function setup(options = {}) {
   // Load the actual application, with unrelated startup fetches left pending.
   const fetch = () => new Promise(() => {});
   const app = new Function(
-    "document", "window", "navigator", "Image", "setTimeout", "clearTimeout", "fetch",
+    "document", "window", "navigator", "Image", "setTimeout", "clearTimeout", "fetch", "Date",
     source + "\nreturn { createLegacyStreamImage, state, LEGACY_IOS };"
   )(document, { fetch }, { userAgent: "iPad; CPU OS 12_5_8 like Mac OS X" },
-    Image, setTimeout, clearTimeout, fetch);
+    Image, setTimeout, clearTimeout, fetch, { now: () => now });
   assert(app.LEGACY_IOS, "iPad mini 3 must use the legacy stream");
   app.createLegacyStreamImage("/static/stream.jpg?camera=gate");
   return { advance, requests, options, document, state: app.state, loaded: () => loaded };
@@ -75,7 +78,7 @@ const slow = setup();
 slow.advance(799);
 assert(slow.requests.length === 1, "Do not replace a frame still loading after 200 ms");
 slow.advance(4201);
-assert(slow.loaded() === 5, "Slow frames must keep displaying instead of being cancelled");
+assert(slow.loaded() === 6, "Slow frames must keep displaying instead of being cancelled");
 assert(new Set(slow.requests).size === slow.requests.length, "Each request must bypass cache");
 assert(slow.requests.every((url) => url.includes("?camera=gate&ts=")), "Preserve existing query parameters");
 
@@ -110,5 +113,15 @@ assert(paused.requests.length === 1, "Pause new image requests while the page is
 paused.document.hidden = false;
 paused.advance(1100);
 assert(paused.loaded() === 2, "Resume frames when the page is visible again");
+
+const paced = setup({ delay: 150 });
+paced.advance(1000);
+assert(paced.loaded() === 5, "Download time must count toward the frame interval, not add to it");
+const inactive = setup({ inactive: true });
+inactive.advance(2000);
+assert(inactive.requests.length === 0, "A hidden app tab must not compete for image bandwidth");
+inactive.options.inactive = false;
+inactive.advance(1100);
+assert(inactive.loaded() >= 1, "Switching back to the stream must resume frames");
 
 report("Stream refresh regression checks passed");

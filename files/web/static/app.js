@@ -7,7 +7,14 @@ const state = {
   plates: [],
   plateStatus: {},
   events: [],
-  eventsOffset: 0,
+  eventsPage: 0,
+  eventsCursors: [null],
+  eventsNextCursor: null,
+  eventsHasMore: false,
+  eventsLoaded: false,
+  eventsWindow: "30d",
+  eventsStartId: null,
+  eventsRequest: 0,
   loadingCandidateEvents: false,
   eventsKinds: new Set(["recognised", "unmatched"]),
   latestRecognised: null,
@@ -328,6 +335,7 @@ function createLegacyStreamImage(url) {
   img.className = "stream-image-single";
   let timer = null;
   let requestTimeout = null;
+  let requestStartedAt = 0;
   const schedule = (delay) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(loadNext, delay);
@@ -339,13 +347,17 @@ function createLegacyStreamImage(url) {
     schedule(delay);
   };
   const loadNext = () => {
-    if (document.hidden || state.gateOpenInFlight) {
+    const panel = img.closest ? img.closest(".tab-panel") : null;
+    if (document.hidden || state.gateOpenInFlight || (panel && !panel.classList.contains("active"))) {
       schedule(Math.max(250, STREAM_REFRESH_MS));
       return;
     }
     // Wait for this frame before requesting another. Replacing src on a
     // fixed timer can continually cancel slow loads on older iPads.
-    img.onload = () => finish(Math.max(100, STREAM_REFRESH_MS));
+    requestStartedAt = Date.now();
+    // The interval includes download/decode time; adding it after each load
+    // unnecessarily reduced 10 fps streams to 3–4 fps on slower screens.
+    img.onload = () => finish(Math.max(0, STREAM_REFRESH_MS - (Date.now() - requestStartedAt)));
     img.onerror = () => finish(Math.max(1000, STREAM_REFRESH_MS));
     // Recover even when WebKit never delivers a load/error event.
     requestTimeout = setTimeout(() => {
@@ -362,123 +374,10 @@ function createLegacyStreamImage(url) {
 }
 
 function createSmoothImageStream(url) {
-  const stack = document.createElement("div");
-  stack.className = "stream-image-stack";
-  const display = new Image();
-  display.className = "stream-image-single";
-  display.alt = "Live stream";
-  stack.appendChild(display);
-
-  const buffer = new Image();
-  buffer.alt = "Live stream";
-  let timer = null;
-  let delayMs = STREAM_REFRESH_MS;
-  let inFlight = false;
-  let activeUrl = "";
-  let bufferUrl = "";
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const canFetchBlob =
-    typeof fetch === "function" &&
-    typeof URL !== "undefined" &&
-    typeof URL.createObjectURL === "function";
-  let useDirect = !canFetchBlob;
-
-  const schedule = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(loadNext, delayMs);
-  };
-
-  const isMostlyBlack = (image) => {
-    if (!ctx) return false;
-    const sampleSize = 16;
-    canvas.width = sampleSize;
-    canvas.height = sampleSize;
-    try {
-      ctx.drawImage(image, 0, 0, sampleSize, sampleSize);
-    } catch (err) {
-      return false;
-    }
-    const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
-    let sum = 0;
-    let sumSq = 0;
-    const count = data.length / 4;
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b);
-      sum += lum;
-      sumSq += lum * lum;
-    }
-    const mean = sum / count;
-    const variance = sumSq / count - mean * mean;
-    return mean < 6 && variance < 6;
-  };
-
-  const loadNext = async () => {
-    if (state.gateOpenInFlight) {
-      schedule();
-      return;
-    }
-    if (inFlight) {
-      schedule();
-      return;
-    }
-    inFlight = true;
-    const sep = url.includes("?") ? "&" : "?";
-    const next = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
-    try {
-      if (!useDirect) {
-        const resp = await fetch(next, { cache: "no-store" });
-        if (!resp.ok) {
-          throw new Error("fetch failed");
-        }
-        const blob = await resp.blob();
-        if (ctx && typeof createImageBitmap === "function") {
-          const bmp = await createImageBitmap(blob);
-          const isBlack = isMostlyBlack(bmp);
-          bmp.close();
-          if (isBlack) {
-            delayMs = Math.min(Math.round(delayMs * 1.2), 1000);
-            schedule();
-            return;
-          }
-        }
-        if (bufferUrl) URL.revokeObjectURL(bufferUrl);
-        bufferUrl = URL.createObjectURL(blob);
-        buffer.src = bufferUrl;
-      } else {
-        buffer.src = next;
-      }
-      buffer.onload = () => {
-        const nextUrl = bufferUrl || buffer.src;
-        display.src = nextUrl;
-        if (activeUrl) URL.revokeObjectURL(activeUrl);
-        activeUrl = bufferUrl || "";
-        bufferUrl = "";
-        buffer.onload = null;
-        buffer.onerror = null;
-        delayMs = STREAM_REFRESH_MS;
-        schedule();
-      };
-      buffer.onerror = () => {
-        buffer.onload = null;
-        buffer.onerror = null;
-        delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
-        schedule();
-      };
-    } catch (err) {
-      useDirect = true;
-      delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
-      schedule();
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  loadNext();
-  return stack;
+  // Native image replacement retains the previous frame while loading. Using
+  // the same bounded loader on every browser avoids extra fetch/blob/bitmap
+  // conversions and gives desktop screens the same timeout recovery as iOS.
+  return createLegacyStreamImage(url);
 }
 
 async function loadAllowlist() {
@@ -561,36 +460,82 @@ async function saveAllowlist() {
   setStatus("Saved");
 }
 
-async function fetchEvents({ reset = false, limit = 30, kind = null } = {}) {
-  if (state.loadingCandidateEvents) return;
+async function fetchEvents({ reset = false, page = state.eventsPage, startId = null } = {}) {
+  if (state.loadingCandidateEvents && !reset) return;
+  if (reset) page = 0;
+  if (page < 0) return;
+  const requestedStartId = reset ? startId : state.eventsStartId;
+  const cursor = page === state.eventsPage + 1 ? state.eventsNextCursor : state.eventsCursors[page];
+  if (page > 0 && !cursor) return;
+  const requestId = ++state.eventsRequest;
   state.loadingCandidateEvents = true;
-  if (reset) {
-    state.events = [];
-    state.eventsOffset = 0;
-  }
+  updateHistoryPagination();
   try {
     const params = new URLSearchParams({
-      offset: String(state.eventsOffset),
-      limit: String(limit),
+      limit: "30",
+      window: state.eventsWindow,
+      kind: Array.from(state.eventsKinds).join(","),
     });
-    if (kind) {
-      params.set("kind", kind);
-    } else {
-      params.set("kind", "recognised,unmatched,candidate");
-    }
-    const resp = await fetch(`/api/events?${params.toString()}`);
+    if (page > 0) params.set("cursor", cursor);
+    else if (requestedStartId) params.set("start_id", requestedStartId);
+    const resp = await fetch(`/api/history?${params.toString()}`);
     if (!resp.ok) {
       throw new Error(`events ${resp.status}`);
     }
     const data = await resp.json();
-    state.eventsOffset += data.length;
-    state.events = state.events.concat(data);
+    if (requestId !== state.eventsRequest) return;
+    state.events = Array.isArray(data.items) ? data.items : [];
+    state.eventsPage = page;
+    if (reset) state.eventsCursors = [null];
+    state.eventsStartId = requestedStartId;
+    state.eventsCursors[page] = page > 0 ? cursor : null;
+    state.eventsCursors.length = page + 1;
+    state.eventsNextCursor = data.next_cursor || null;
+    state.eventsHasMore = Boolean(data.has_more && state.eventsNextCursor);
+    state.eventsLoaded = true;
   } catch (err) {
-    setStatus("Failed to load events");
+    if (requestId === state.eventsRequest) setStatus("Failed to load history. Try refreshing.");
   } finally {
-    state.loadingCandidateEvents = false;
-    renderEvents();
+    if (requestId === state.eventsRequest) {
+      state.loadingCandidateEvents = false;
+      renderEvents();
+    }
   }
+}
+
+function updateHistoryPagination() {
+  const previous = document.getElementById("history-prev");
+  const next = document.getElementById("history-next");
+  const label = document.getElementById("events-more");
+  if (previous) previous.disabled = state.loadingCandidateEvents || state.eventsPage === 0;
+  if (next) next.disabled = state.loadingCandidateEvents || !state.eventsHasMore;
+  if (label) label.textContent = state.loadingCandidateEvents
+    ? "Loading history…"
+    : `Page ${state.eventsPage + 1}${state.eventsHasMore ? "" : " • End of history"}`;
+}
+
+function historyPreview(event, small = false) {
+  if (small && event.thumbnail_url) return event.thumbnail_url;
+  if (event.preview_url) return event.preview_url;
+  // Also works during a deployment while a browser still has older event JSON.
+  return event.image_url ? event.image_url.replace(/^\/images\//, "/previews/") + `?size=${small ? 160 : 640}` : "";
+}
+
+function deferHistoryImage(img, url) {
+  setLowPriorityImage(img);
+  img.dataset.previewSrc = url;
+}
+
+function loadVisibleHistoryImages() {
+  if (!isTabActive("candidates")) return;
+  // Bounding boxes work on iOS 12, where native image lazy loading is unavailable.
+  document.querySelectorAll("#events-list img[data-preview-src]").forEach((img) => {
+    const rect = img.getBoundingClientRect();
+    if (rect.bottom >= -200 && rect.top <= window.innerHeight + 200) {
+      img.src = img.dataset.previewSrc;
+      delete img.dataset.previewSrc;
+    }
+  });
 }
 
 function parseCapturedEpoch(ts) {
@@ -632,6 +577,8 @@ function groupEventsByWindow(events) {
       } else {
         group.images.push({
           url: event.image_url,
+          preview: historyPreview(event),
+          thumbnail: historyPreview(event, true),
           name: event.image_name,
           confidence: conf,
         });
@@ -714,7 +661,7 @@ function summarizeGroup(events) {
   });
 }
 
-function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
+function renderFrameStrip(images, heroImg, confEl, originalLink, activeIndex = 0) {
   if (!images.length) return null;
   const strip = document.createElement("div");
   strip.className = "frame-strip";
@@ -723,12 +670,14 @@ function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
     setLowPriorityImage(thumb);
     thumb.alt = "frame";
     thumb.className = idx === activeIndex ? "active" : "";
-    thumb.src = img.url;
+    deferHistoryImage(thumb, img.thumbnail);
     if (Number.isFinite(img.confidence)) {
       thumb.title = `Conf: ${img.confidence.toFixed(2)}`;
     }
     thumb.addEventListener("click", () => {
-      heroImg.src = img.url;
+      delete heroImg.dataset.previewSrc;
+      heroImg.src = img.preview;
+      originalLink.href = img.url;
       if (confEl) {
         const nextConf = Number.isFinite(img.confidence) ? img.confidence.toFixed(2) : "--";
         confEl.textContent = `Conf: ${nextConf}`;
@@ -743,7 +692,6 @@ function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
 
 function renderEvents() {
   const eventsList = document.getElementById("events-list");
-  const eventsMore = document.getElementById("events-more");
   if (!eventsList) return;
   eventsList.innerHTML = "";
   const groups = groupEventsByWindow(state.events);
@@ -883,8 +831,14 @@ function renderEvents() {
       img.className = "event-image";
       setLowPriorityImage(img);
       img.alt = "capture";
-      img.src = heroImage;
-      imageWrap.appendChild(img);
+      deferHistoryImage(img, bestImage ? bestImage.preview : group.images[0].preview);
+      const originalLink = document.createElement("a");
+      originalLink.href = heroImage;
+      originalLink.target = "_blank";
+      originalLink.rel = "noopener";
+      originalLink.title = "Open full-size capture";
+      originalLink.appendChild(img);
+      imageWrap.appendChild(originalLink);
       const conf = document.createElement("div");
       conf.className = "event-image-conf";
       const startConf =
@@ -901,7 +855,7 @@ function renderEvents() {
           0,
           group.images.findIndex((image) => image.url === heroImage)
         );
-        const strip = renderFrameStrip(group.images, img, conf, idx);
+        const strip = renderFrameStrip(group.images, img, conf, originalLink, idx);
         if (strip) actions.appendChild(strip);
         right.appendChild(actions);
       }
@@ -912,14 +866,13 @@ function renderEvents() {
     eventsList.appendChild(card);
   });
 
-  if (eventsMore) {
-    eventsMore.textContent = state.loadingCandidateEvents ? "Loading..." : "Scroll for more";
-  }
+  updateHistoryPagination();
+  loadVisibleHistoryImages();
   if (state.events.length === 0 || filtered.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     const kinds = Array.from(state.eventsKinds).join(", ");
-    empty.textContent = `No ${kinds} events yet.`;
+    empty.textContent = `No ${kinds} events in this date range.`;
     eventsList.appendChild(empty);
   }
   renderLatestEvent();
@@ -938,7 +891,7 @@ function renderLatestImage() {
   setLowPriorityImage(image);
   image.alt = event.plate || "capture";
   image.classList.add("latest-thumb");
-  image.src = event.image_url;
+  image.src = historyPreview(event);
   image.addEventListener("click", () => {
     if (event && event.id) {
       jumpToEvent(String(event.id));
@@ -1056,12 +1009,12 @@ function setActiveTab(target, { updateHash = true } = {}) {
     panel.classList.toggle("active", isActive);
     panel.setAttribute("aria-hidden", String(!isActive));
   });
-  if (target === "candidates" && state.events.length === 0) {
-    state.eventsKinds = new Set(["recognised", "unmatched"]);
+  if (target === "candidates" && !state.eventsLoaded && !state.loadingCandidateEvents) {
     fetchEvents({ reset: true });
   }
   if (target === "candidates") {
     renderLatestImage();
+    loadVisibleHistoryImages();
   }
   if (target === "timeline" && !state.timelineLoaded) {
     initTimeline();
@@ -1318,11 +1271,7 @@ function initFilters() {
         state.eventsKinds = new Set(["recognised", "unmatched"]);
         chips.forEach((btn) => btn.classList.add("active"));
       }
-      if (state.events.length === 0) {
-        fetchEvents({ reset: true });
-      } else {
-        renderEvents();
-      }
+      fetchEvents({ reset: true });
     });
   });
 }
@@ -1342,6 +1291,7 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
     setGateStatus(gateStatus, "opening", "Gate opening");
     setGateButtonState(gateBtn, "opening");
     state.gateOpenInFlight = true;
+    let failed = false;
     try {
       const resp = await fetchOpenGate();
       if (resp.status === 429) {
@@ -1350,11 +1300,16 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
         setStatus(`Opening the gate (${retryIn}s)`);
         startCooldownCountdown(retryIn, { gateBtn, gateStatus, cooldownEl });
       } else if (!resp.ok) {
+        failed = true;
         let message = "Open failed";
+        let retryIn = 0;
         try {
           const data = await resp.json();
           if (data && data.error === "stale_open_request") {
             message = "Open request expired";
+          } else if (data && data.may_have_activated) {
+            message = "Gate response uncertain — check gate";
+            retryIn = Number(data.retry_in) || 30;
           }
         } catch (err) {
           // Keep the generic failure message if the response is not JSON.
@@ -1362,12 +1317,16 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
         setStatus(message);
         setGateStatus(gateStatus, "error", message);
         setGateButtonState(gateBtn, "error");
+        if (retryIn > 0) {
+          startCooldownCountdown(retryIn, { gateBtn, gateStatus, cooldownEl, errorLabel: message });
+        }
       } else {
         setStatus("Gate opened");
         initCooldownStatus();
         refreshGateLastOpen();
       }
     } catch (err) {
+      failed = true;
       const message = err && err.name === "AbortError" ? "Open timed out" : "Open failed";
       setStatus(message);
       setGateStatus(gateStatus, "error", message);
@@ -1377,23 +1336,26 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
       if (!gateBtn.dataset.cooldown) {
         gateBtn.disabled = false;
         gateBtn.textContent = "Open the gate";
-        setGateStatus(gateStatus, "ready", "Gate ready");
-        setGateButtonState(gateBtn, "ready");
+        if (!failed) {
+          setGateStatus(gateStatus, "ready", "Gate ready");
+          setGateButtonState(gateBtn, "ready");
+        }
         if (cooldownEl) cooldownEl.textContent = "Opening the gate: --";
       }
     }
   });
 }
 
-function startCooldownCountdown(seconds, { gateBtn, gateStatus, cooldownEl }) {
+function startCooldownCountdown(seconds, { gateBtn, gateStatus, cooldownEl, errorLabel = "" }) {
   if (!gateBtn) return;
   gateBtn.dataset.cooldown = "true";
   let remaining = seconds;
-  setGateStatus(gateStatus, "opening", "Gate opening");
-  setGateButtonState(gateBtn, "opening");
+  setGateStatus(gateStatus, errorLabel ? "error" : "opening", errorLabel || "Gate opening");
+  setGateButtonState(gateBtn, errorLabel ? "error" : "opening");
   const tick = () => {
-    if (cooldownEl) cooldownEl.textContent = `Opening the gate: ${remaining}s`;
-    gateBtn.textContent = `Opening the gate: ${remaining}s`;
+    const label = errorLabel ? `Retry available in ${remaining}s` : `Opening the gate: ${remaining}s`;
+    if (cooldownEl) cooldownEl.textContent = label;
+    gateBtn.textContent = label;
     gateBtn.disabled = true;
     remaining -= 1;
     if (remaining < 0) {
@@ -1410,59 +1372,69 @@ function startCooldownCountdown(seconds, { gateBtn, gateStatus, cooldownEl }) {
   tick();
 }
 
-function initInfiniteScroll() {
-  window.addEventListener("scroll", () => {
-    const platesPanel = document.getElementById("tab-candidates");
-    if (!platesPanel || !platesPanel.classList.contains("active")) return;
-    const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 200;
-    if (!nearBottom) return;
-    fetchEvents();
+function initHistoryPagination() {
+  const previous = document.getElementById("history-prev");
+  const next = document.getElementById("history-next");
+  const refresh = document.getElementById("history-refresh");
+  const windowSelect = document.getElementById("history-window");
+  const movePage = async (page) => {
+    await fetchEvents({ page });
+    const list = document.getElementById("history-controls");
+    if (list) list.scrollIntoView({ block: "start" });
+    loadVisibleHistoryImages();
+  };
+  if (previous) previous.addEventListener("click", () => movePage(state.eventsPage - 1));
+  if (next) next.addEventListener("click", () => movePage(state.eventsPage + 1));
+  if (refresh) refresh.addEventListener("click", () => fetchEvents({ reset: true }));
+  if (windowSelect) windowSelect.addEventListener("change", () => {
+    state.eventsWindow = windowSelect.value;
+    fetchEvents({ reset: true });
   });
+  let scheduled = false;
+  const scheduleImages = () => {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(() => {
+      scheduled = false;
+      loadVisibleHistoryImages();
+    }, 80);
+  };
+  window.addEventListener("scroll", scheduleImages, { passive: true });
+  window.addEventListener("resize", scheduleImages);
 }
 
 function initLatestJump() {
   const latestJump = document.getElementById("latest-jump");
   if (!latestJump) return;
-  latestJump.addEventListener("click", () => {
-    const historyTab = document.querySelector('.tab[data-tab="candidates"]');
-    if (historyTab) historyTab.click();
+  latestJump.addEventListener("click", async () => {
+    if (state.latestRecognised && state.latestRecognised.id) {
+      jumpToEvent(String(state.latestRecognised.id));
+      return;
+    }
+    setActiveTab("candidates");
     setKindFilters(["recognised"]);
-    fetchEvents({ reset: true });
-    setTimeout(() => {
-      const latest = document.getElementById("event-latest");
-      if (latest) {
-        latest.scrollIntoView({ behavior: "smooth", block: "center" });
-        latest.classList.add("highlight");
-        setTimeout(() => latest.classList.remove("highlight"), 1200);
-      }
-    }, 200);
+    await fetchEvents({ reset: true });
   });
 }
 
-function jumpToEvent(eventId) {
-  const historyTab = document.querySelector('.tab[data-tab="candidates"]');
-  if (historyTab) historyTab.click();
+async function jumpToEvent(eventId) {
+  setActiveTab("candidates");
   setKindFilters(["recognised", "unmatched"]);
-  fetchEvents({ reset: true });
-  const attempt = (tries = 0) => {
-    const cards = document.querySelectorAll(".event-card[data-event-ids]");
-    for (const card of cards) {
-      const ids = (card.dataset.eventIds || "").split(",").map((id) => id.trim());
-      if (ids.includes(eventId)) {
-        card.scrollIntoView({ behavior: "smooth", block: "center" });
-        card.classList.add("highlight");
-        setTimeout(() => card.classList.remove("highlight"), 1200);
-        return;
-      }
+  state.eventsWindow = "all";
+  const windowSelect = document.getElementById("history-window");
+  if (windowSelect) windowSelect.value = "all";
+  await fetchEvents({ reset: true, startId: eventId });
+  const cards = document.querySelectorAll(".event-card[data-event-ids]");
+  for (const card of cards) {
+    const ids = (card.dataset.eventIds || "").split(",");
+    if (ids.includes(eventId)) {
+      card.scrollIntoView({ block: "center" });
+      loadVisibleHistoryImages();
+      card.classList.add("highlight");
+      setTimeout(() => card.classList.remove("highlight"), 1200);
+      break;
     }
-    if (tries < 6) {
-      if (!state.loadingCandidateEvents) {
-        fetchEvents();
-      }
-      setTimeout(() => attempt(tries + 1), 500);
-    }
-  };
-  setTimeout(() => attempt(0), 300);
+  }
 }
 
 async function initCooldownStatus() {
@@ -1508,13 +1480,13 @@ async function initMain() {
   }
   initTabs();
   initGateButtonFor({ buttonId: "open-gate", statusId: "gate-status", cooldownId: "cooldown-status" });
-  initInfiniteScroll();
+  initHistoryPagination();
   initFilters();
   initLatestJump();
   updateStatusTimestamp();
   setKindFilters(["recognised", "unmatched"]);
   state.latestRecognised = null;
-  if (isTabActive("candidates") && state.events.length === 0 && !state.loadingCandidateEvents) {
+  if (isTabActive("candidates") && !state.eventsLoaded && !state.loadingCandidateEvents) {
     await fetchEvents({ reset: true });
   }
   initCooldownStatus();
@@ -1623,7 +1595,7 @@ function renderTabletTimeline() {
     const row = document.createElement("div");
     row.className = "tablet-timeline-row";
     const thumb = event.image_url
-      ? `<img src="${escapeHtml(event.image_url)}" alt="capture" loading="lazy" decoding="async" fetchpriority="low" />`
+      ? `<img src="${escapeHtml(historyPreview(event, true))}" alt="capture" loading="lazy" decoding="async" fetchpriority="low" />`
       : `<div class="tablet-thumb-placeholder"></div>`;
     const ageMinutes = getAgeMinutes(event.captured_at);
     const dotClass = ageMinutes !== null && ageMinutes < 60 ? "dot-fresh" : "dot-stale";

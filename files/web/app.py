@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import base64
 import fcntl
+import hashlib
 import hmac
 import json
 import math
@@ -9,12 +11,15 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -24,6 +29,7 @@ if ROOT_DIR not in sys.path:
 
 from allowlist_util import normalise_plate  # noqa: E402
 from gate_runtime import (  # noqa: E402
+    GateActuationError,
     configure_logging,
     env_int,
     init_events_db,
@@ -37,6 +43,9 @@ from gate_runtime import open_gate as trigger_gate  # noqa: E402
 ALLOWLIST_PATH = os.getenv("PLATE_ALLOWLIST_PATH", "/opt/gate_anpr/allowlist.json")
 LOG_PATH = "/var/log/gate-anpr/gate_anpr_web.log"
 PLATES_DIR = "/home/pi/plates"
+STREAM_JPEG_PATH = os.getenv("GATE_WEB_STREAM_JPEG", "/run/gate-anpr/stream.jpg")
+STREAM_STALE_SECONDS = 15
+PREVIEW_LOCK = threading.Lock()
 GATE_PIN_BOARD = env_int("GATE_PIN_BOARD", 23, "gate_anpr_web")
 GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
@@ -225,7 +234,7 @@ LOG_RANGE_MAP = {
 
 @app.after_request
 def add_cache_headers(response):
-    if request.path.startswith("/images/"):
+    if request.path.startswith(("/images/", "/previews/")) and response.status_code == 200:
         # Plate JPEGs are content-addressed by timestamp — they never change.
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
@@ -323,39 +332,40 @@ def _query_events(kinds=None, offset=0, limit=60, since=None):
             f"""
             SELECT * FROM events
             {where}
-            ORDER BY captured_at DESC
+            ORDER BY captured_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (*params, limit, offset),
         ).fetchall()
-        results = []
-        for row in rows:
-            image_name = row["image_name"] or ""
-            results.append(
-                {
-                    "id": row["id"],
-                    "uuid": row["uuid"],
-                    "plate": _display_plate(row["plate"]),
-                    "owner": row["owner"],
-                    "allowed": bool(row["allowed"]),
-                    "confidence": row["confidence"],
-                    "kind": row["kind"],
-                    "captured_at": row["captured_at"],
-                    "source": row["source"],
-                    "processing_time_ms": row["processing_time_ms"],
-                    "observed_plate": row["observed_plate"],
-                    "observed_confidence": row["observed_confidence"],
-                    "fuzzy_distance": row["fuzzy_distance"],
-                    "fuzzy": bool(row["fuzzy"]) if row["fuzzy"] is not None else False,
-                    "request_ip": row["request_ip"],
-                    "detail": _parse_detail(row["detail"]),
-                    "image_name": image_name,
-                    "image_url": f"/images/{image_name}" if image_name else "",
-                }
-            )
-        return results
+        return [_event_payload(row) for row in rows]
     finally:
         conn.close()
+
+
+def _event_payload(row):
+    image_name = row["image_name"] or ""
+    return {
+        "id": row["id"],
+        "uuid": row["uuid"],
+        "plate": _display_plate(row["plate"]),
+        "owner": row["owner"],
+        "allowed": bool(row["allowed"]),
+        "confidence": row["confidence"],
+        "kind": row["kind"],
+        "captured_at": row["captured_at"],
+        "source": row["source"],
+        "processing_time_ms": row["processing_time_ms"],
+        "observed_plate": row["observed_plate"],
+        "observed_confidence": row["observed_confidence"],
+        "fuzzy_distance": row["fuzzy_distance"],
+        "fuzzy": bool(row["fuzzy"]) if row["fuzzy"] is not None else False,
+        "request_ip": row["request_ip"],
+        "detail": _parse_detail(row["detail"]),
+        "image_name": image_name,
+        "image_url": f"/images/{image_name}" if image_name else "",
+        "preview_url": f"/previews/{image_name}?size=640" if image_name else "",
+        "thumbnail_url": f"/previews/{image_name}?size=160" if image_name else "",
+    }
 
 
 init_events_db(EVENTS_DB_PATH)
@@ -531,11 +541,24 @@ def _gate_run_with_cooldown(action):
         now = time.time()
         remaining = max(0, int(GATE_COOLDOWN_SECONDS - (now - last_ts)))
         if remaining == 0:
-            action()
-            handle.seek(0)
-            handle.truncate()
-            handle.write(f"{now:.3f}\n")
-            handle.flush()
+
+            def save_cooldown():
+                handle.seek(0)
+                handle.truncate()
+                handle.write(f"{now:.3f}\n")
+                handle.flush()
+
+            try:
+                pulsed = action()
+            except GateActuationError as exc:
+                if exc.may_have_activated:
+                    save_cooldown()
+                raise
+            save_cooldown()
+            if pulsed is False:
+                # ANPR or another process just opened it. Do not record a
+                # second manual opening for a pulse that did not happen.
+                remaining = GATE_COOLDOWN_SECONDS
         fcntl.flock(handle, fcntl.LOCK_UN)
     return remaining
 
@@ -824,7 +847,18 @@ def open_gate():
     err = _check_manual_open_freshness(request_ip)
     if err:
         return err
-    remaining = _gate_run_with_cooldown(lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log))
+    try:
+        remaining = _gate_run_with_cooldown(lambda: trigger_gate(GATE_PIN_BOARD, GATE_PIN_BCM, log))
+    except GateActuationError as exc:
+        log.error("Manual gate request failed (activation attempted=%s)", exc.may_have_activated)
+        return jsonify(
+            {
+                "ok": False,
+                "error": "gate_open_failed",
+                "may_have_activated": exc.may_have_activated,
+                "retry_in": GATE_COOLDOWN_SECONDS if exc.may_have_activated else 0,
+            }
+        ), 503
     if remaining > 0:
         return jsonify({"ok": False, "retry_in": remaining}), 429
     insert_event(
@@ -886,6 +920,87 @@ def get_events():
     window = _window_bounds(window_key) if window_key else None
     events = _query_events(kinds=kinds, offset=offset, limit=limit, since=window)
     return jsonify(events)
+
+
+def _history_cursor(captured_at, event_id, snapshot, since):
+    data = json.dumps([captured_at, event_id, snapshot, since], separators=(",", ":"))
+    return base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
+
+
+@app.route("/api/history", methods=["GET"])
+def get_history():
+    """Bounded, stable pages: new captures cannot shift an in-progress browse."""
+    limit = _int_arg("limit", 30, 1, 60)
+    window = request.args.get("window", "30d")
+    kinds = set(request.args.get("kind", "recognised,unmatched").split(","))
+    if window not in {"24h", "7d", "30d", "all"} or not kinds or not kinds <= {"recognised", "unmatched"}:
+        return jsonify({"error": "invalid history filters"}), 400
+    since_date = _window_bounds(window)
+    since = since_date.strftime("%Y-%m-%d %H:%M:%S") if since_date else None
+    cursor = request.args.get("cursor", "")
+    anchor = None
+    snapshot = None
+    if cursor:
+        try:
+            if len(cursor) > 512:
+                raise ValueError()
+            captured, event_id, snapshot, since = json.loads(
+                base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            )
+            if not isinstance(captured, str) or parse_local_timestamp(captured) is None:
+                raise ValueError()
+            if type(event_id) is not int or type(snapshot) is not int or not (1 <= event_id <= snapshot <= 2**63 - 1):
+                raise ValueError()
+            if since is not None and (not isinstance(since, str) or parse_local_timestamp(since) is None):
+                raise ValueError()
+            anchor = (captured, event_id)
+        except (ValueError, TypeError, UnicodeError):
+            return jsonify({"error": "invalid history cursor"}), 400
+    conn = sqlite3.connect(EVENTS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        if snapshot is None:
+            snapshot = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+        clauses = ["id <= ?"]
+        params = [snapshot]
+        kind_clauses = []
+        if "recognised" in kinds:
+            kind_clauses.append(
+                "(kind = 'recognised' OR (kind IN ('unmatched', 'candidate') AND COALESCE(owner, '') != ''))"
+            )
+        if "unmatched" in kinds:
+            kind_clauses.append("(kind IN ('unmatched', 'candidate') AND COALESCE(owner, '') = '')")
+        clauses.append("(" + " OR ".join(kind_clauses) + ")")
+        if since:
+            clauses.append("captured_at >= ?")
+            params.append(since)
+        if anchor:
+            clauses.append("(captured_at, id) < (?, ?)")
+            params.extend(anchor)
+        elif request.args.get("start_id"):
+            try:
+                start_id = int(request.args["start_id"])
+                if not 1 <= start_id <= 2**63 - 1:
+                    raise ValueError()
+            except ValueError:
+                return jsonify({"error": "invalid event id"}), 400
+            target = conn.execute("SELECT captured_at, id FROM events WHERE id = ?", (start_id,)).fetchone()
+            if target is None:
+                return jsonify({"error": "capture no longer available"}), 404
+            clauses.append("(captured_at, id) <= (?, ?)")
+            params.extend(target)
+        rows = conn.execute(
+            f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY captured_at DESC, id DESC LIMIT ?",
+            (*params, limit + 1),
+        ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = _history_cursor(rows[-1]["captured_at"], rows[-1]["id"], snapshot, since) if has_more else None
+        return jsonify(
+            {"items": [_event_payload(row) for row in rows], "next_cursor": next_cursor, "has_more": has_more}
+        )
+    finally:
+        conn.close()
 
 
 @app.route("/api/timeline", methods=["GET"])
@@ -1408,21 +1523,29 @@ def _latest_event_timestamp():
 def healthz():
     db_ok, db_error = sqlite_healthcheck(EVENTS_DB_PATH)
     allowlist_ok = os.path.exists(ALLOWLIST_PATH) and os.access(ALLOWLIST_PATH, os.R_OK)
-    stream_path = os.path.join(STATIC_DIR, "stream.jpg")
-    stream_exists = os.path.exists(stream_path)
+    try:
+        stream_stat = os.stat(STREAM_JPEG_PATH)
+        stream_age = max(0, time.time() - stream_stat.st_mtime)
+        stream_exists = stream_stat.st_size > 0
+    except OSError:
+        stream_age = None
+        stream_exists = False
+    stream_fresh = stream_exists and stream_age <= STREAM_STALE_SECONDS
     services = {
         "alprd": _systemctl_is_active("alprd"),
         "gate_anpr": _systemctl_is_active("gate_anpr"),
         "gate_anpr_web": _systemctl_is_active("gate_anpr_web"),
+        "beanstalkd": _systemctl_is_active("beanstalkd"),
+        "gate_anpr_stream_jpeg": _systemctl_is_active("gate_anpr_stream_jpeg"),
     }
-    ok = db_ok and allowlist_ok and services["gate_anpr_web"] == "active"
+    ok = db_ok and allowlist_ok and stream_fresh and all(status == "active" for status in services.values())
     maint = _maintenance_health()
     return jsonify(
         {
             "ok": ok,
             "db": {"ok": db_ok, "error": db_error},
             "allowlist": {"ok": allowlist_ok},
-            "stream": {"exists": stream_exists},
+            "stream": {"exists": stream_exists, "fresh": stream_fresh, "age_seconds": stream_age},
             "services": services,
             "maintenance": {
                 "last_success": maint.get("last_success"),
@@ -1518,6 +1641,49 @@ def logs():
             "error": error,
         }
     )
+
+
+@app.route("/previews/<name>")
+def get_preview(name):
+    """Decode each original once per size, then serve the cached small JPEG."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:jpg|jpeg)", name, re.IGNORECASE):
+        abort(404)
+    size = request.args.get("size", "640")
+    if size not in {"160", "640"}:
+        abort(400)
+    original = os.path.join(PLATES_DIR, name)
+    if not os.path.realpath(original).startswith(os.path.realpath(PLATES_DIR) + os.sep):
+        abort(404)
+    try:
+        stat = os.stat(original)
+    except OSError:
+        abort(404)
+    # Include source identity so corrected/replaced captures cannot reuse a stale file.
+    key = hashlib.sha256(f"{name}:{stat.st_mtime_ns}:{stat.st_size}:{size}".encode()).hexdigest()
+    cache_dir = os.path.join(PLATES_DIR, ".previews")
+    cache_name = key + ".jpg"
+    cache_path = os.path.join(cache_dir, cache_name)
+    with PREVIEW_LOCK:
+        if not os.path.isfile(cache_path):
+            os.makedirs(cache_dir, exist_ok=True)
+            temporary = None
+            try:
+                with Image.open(original) as image:
+                    image.draft("RGB", (int(size), int(size)))
+                    image = ImageOps.exif_transpose(image)
+                    image.thumbnail((int(size), int(size)), Image.Resampling.LANCZOS)
+                    with tempfile.NamedTemporaryFile(dir=cache_dir, suffix=".tmp", delete=False) as handle:
+                        temporary = handle.name
+                        image.convert("RGB").save(handle, format="JPEG", quality=75)
+                    # Existing capture retention also cleans previews at the same age.
+                    os.utime(temporary, (stat.st_atime, stat.st_mtime))
+                    os.replace(temporary, cache_path)
+            except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
+                abort(404)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+    return send_from_directory(cache_dir, cache_name)
 
 
 @app.route("/images/<path:name>")
