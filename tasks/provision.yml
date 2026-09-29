@@ -271,21 +271,48 @@
   tags:
     - provision
 
-- name: Set openalpr.conf for gb and legacy tuning
+- name: Validate optional detection-mask candidate limits
+  assert:
+    that:
+      - alpr_mask_max_plate_width_percent | string is match('^[0-9]+(\.[0-9]+)?$')
+      - alpr_mask_max_plate_height_percent | string is match('^[0-9]+(\.[0-9]+)?$')
+      - alpr_mask_max_plate_width_percent | float > 0
+      - alpr_mask_max_plate_width_percent | float <= 100
+      - alpr_mask_max_plate_height_percent | float > 0
+      - alpr_mask_max_plate_height_percent | float <= 100
+    fail_msg: Mask candidate-size limits must be percentages greater than zero and at most 100.
+  when: alpr_detection_mask_source | length > 0
+  tags:
+    - provision
+
+- name: Install optional private detection mask
   copy:
+    src: "{{ alpr_detection_mask_source }}"
+    dest: "{{ alpr_detection_mask_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: alpr_detection_mask_source | length > 0
+  notify: restart alprd
+  tags:
+    - provision
+
+- name: Set openalpr.conf for gb and optional detection mask
+  template:
+    src: files/openalpr.conf.j2
     dest: "{{ openalpr_conf_path }}"
     owner: root
     group: root
     mode: "0644"
-    content: |
-      config_file = {{ openalpr_share_dir }}/config/openalpr.defaults.conf
-      runtime_dir = {{ openalpr_share_dir }}/runtime_data
-      country = gb
-      max_plate_width_percent = 30
-      max_plate_height_percent = 10
-      topn = 5
-      must_match_pattern = 1
   notify: restart alprd
+  tags:
+    - provision
+
+- name: Remove managed detection mask when disabled
+  file:
+    path: "{{ alpr_detection_mask_path }}"
+    state: absent
+  when: alpr_detection_mask_source | length == 0
   tags:
     - provision
 

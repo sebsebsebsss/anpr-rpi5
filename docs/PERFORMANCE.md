@@ -1,8 +1,8 @@
 # Measured performance work — 29 September 2026
 
 The wall displays and recognition reliability take priority. HTTPS remains
-optional. No detection mask, camera setting or recognition-input change is
-included in the display work below.
+optional. Display tuning leaves camera and recognition settings unchanged.
+The separately approved recognition changes are recorded below.
 
 ## Where the CPU goes
 
@@ -12,7 +12,8 @@ Recognition therefore used about 37% of this four-core Pi's total capacity.
 Temperature was 56.75°C with working cooling and no throttling flags. This is
 not a summer or busy-arrival benchmark.
 
-Recognition receives the camera's **2688×1520 H.264 main feed**. The independent
+At the original baseline, recognition received the camera's **2688×1520 H.264
+main feed**. The later 1080p/mask deployment is recorded below. The independent
 preview receives **1280×720 H.264** and publishes the main JPEG at **960×540,
 10fps, FFmpeg quality 7**. Earlier notes conflated those two camera inputs.
 OpenALPR is a Release `-O3` build with four analysis workers and a 1280×720
@@ -159,7 +160,7 @@ the mask enabled, separately check recognition parity and arrival timing.
 
 The installed resize code is width-first: when source width exceeds 1280, it
 uses that width ratio and skips the 720-height branch. Integer output dimensions
-therefore make the current 2688×1520 input **1280×723**, despite the nominal
+therefore made the original 2688×1520 input **1280×723**, despite the nominal
 1280×720 configuration. An ideal full-width 85%-height crop (2688×1292) would
 yield 1280×615, or 14.94% fewer detector-search pixels. The installed mask code
 subtracts inclusive bounds without adding one, however: that bitmap produces a
@@ -225,7 +226,86 @@ not recognition-parity evidence. It includes the changed maximum candidate-size
 threshold described above. A useful next comparison would preserve the original
 permitted plate size, replay retained close/edge cases against full-frame results,
 and remeasure CPU before enabling a mask for ordinary arrivals. Full-frame
-recognition remains the production setting.
+recognition was restored after this initial trial; the later rollout is below.
+
+### Optional mask deployment
+
+Public defaults continue to use the full frame. To reproduce an audited mask,
+set `ALPR_DETECTION_MASK_SOURCE` in the ignored `ansible.env` to a private PNG
+on the controller. The image should match the camera input dimensions, with
+white retained areas and black excluded areas. Provisioning installs it as
+`/etc/openalpr/detection-mask.png` and selects it in `openalpr.conf`.
+
+`ALPR_MASK_MAX_PLATE_WIDTH_PERCENT` and
+`ALPR_MASK_MAX_PLATE_HEIGHT_PERCENT` specify candidate-size limits for the
+cropped search rectangle. Their defaults are 30 and 10; calculate compensation
+for the actual mask and installed detector before enabling it. A source-resolution
+change requires reviewing both the bitmap and those limits. These are explicit
+settings, not automatic claims that any mask preserves recognition accuracy.
+
+To disable the mask, clear `ALPR_DETECTION_MASK_SOURCE` and provision again.
+This removes the managed mask and restores the original 30% width / 10% height
+limits, even if compensation values remain in the private environment file.
+
+Changing this configuration restarts `alprd`. Use a quiet maintenance window and
+a tested rollback guard: pause automatic gate handling, apply the configuration,
+restart recognition, and explicitly restore the worker and verify both services.
+The worker requires `alprd`, so restarting recognition can stop it. When restoring
+from a paused-worker comparison, let queued captures exceed the worker's maximum
+age before resuming automatic handling; do not test by publishing synthetic
+allowlisted jobs. There is intentionally no separate mask-only deployment tag.
+
+### Deployed 1080p input and compensated upper-85% mask
+
+The camera owner changed the main stream to 1920×1080. A fresh stream probe
+confirmed H.264 at that resolution, reporting an average rate of 4fps. Two
+20-second samples measured recognition at 132.60% and 133.43% of one core with
+no mask. The running daemon was healthy; its capture loop uses each frame's
+current dimensions and reconnects on failed reads. The daemon was left running
+for that initial CPU observation.
+
+After separate approval, an upper-85% detection mask was enabled. The private
+1920×1080 bitmap has 919 white rows, accounting for the installed mask's
+inclusive-endpoint omission: its actual search rectangle is 1919×918, scaled
+to 1280×612. Candidate limits of 30.02% width and 11.78% height preserve the
+original maximum candidate size of **384×72 detector pixels**. The public
+configuration remains mask-off by default, and neither the private bitmap nor
+private environment settings are committed.
+
+Before deployment, 15 difficult retained images were resized to 1080p and
+compared offline with the installed recognizer and pure worker matching logic.
+All **three existing valid allowlist matches** and **four existing visually
+correct top-10 candidates** survived the 85% mask. Two additional images matched
+correctly. Changed partial/incorrect guesses initially looked like regressions;
+they were not lost valid matches. The daemon actually emits ten candidates from
+its daemon defaults; the legacy `topn=5` in `openalpr.conf` does not control it.
+A 95% variant lost a correct nighttime candidate, so retaining more pixels is
+not automatically safer. This small replay is a sanity check, not an accuracy
+estimate or a substitute for observing real arrivals at the new camera setting.
+
+| Configuration | Recognition CPU, one-core scale | Whole-Pi capacity used by recognition |
+| --- | ---: | ---: |
+| Original 2688×1520, full frame | 145.54% | 36.38% |
+| 1920×1080, full frame | 133.02% | 33.25% |
+| 1920×1080, compensated upper-85% mask | 115.92% | 28.98% |
+
+The masked measurements were 115.50% and 116.33%, each over 20 seconds after a
+20-second warm-up. Together the two changes reduced quiet-scene recognition CPU
+by **20.4%**, saving **7.41 percentage points of whole-Pi capacity** against the
+original baseline. The mask alone saved 12.9% relative to the 1080p unmasked
+observation. Preview CPU remained about 22% of one core; temperature was 56.75°C
+and throttling flags were clear. These sequential observations are not a long-term
+thermal or busy-arrival benchmark.
+
+Deployment tested an independent unarmed rollback guard, armed a five-minute
+restoration timer, then stopped the gate worker and recognizer. Old captures
+were allowed to age past the worker's ten-second limit before the new recognizer
+and automatic gate handling resumed. Both are active, the queue was empty, and
+no recognition errors appeared during the measured interval. Web/preview process
+IDs and unrelated configuration hashes were unchanged. The successful setting
+was retained and its timer cancelled; the previous full-frame configuration and
+restoration script remain in a private backup. Local mask settings are saved for
+future provisioning. Live previews remain full-frame and HTTPS remains optional.
 
 ## Hardware offload has several different meanings
 

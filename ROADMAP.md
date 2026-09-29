@@ -37,9 +37,9 @@ REL-03 becomes worthwhile when simultaneous vehicles matter at this site.
 Performance changes remain optional. Preview profiles (PERF-03) are deployed;
 keep observing smoothness on both physical wall screens. The guarded OCR-thread
 trial (PERF-05) found no useful saving and was reverted. The retained-image audit
-for a detector mask (PERF-01) is complete. A guarded quiet-window CPU comparison
-is appropriate before investing in offline replay; recognition parity and arrival
-timing are separate requirements before leaving a mask enabled.
+for a detector mask (PERF-01) is complete. The compensated upper-85% mask is
+now enabled locally after a bounded replay and guarded rollout; observe real
+arrivals at the new 1080p camera setting before expanding the optimisation.
 Measurements, trial limits and restoration requirements are in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
@@ -85,7 +85,7 @@ checks cover the iPad/Safari-banner sizes, Pi kiosks, phones and both themes.
 
 | ID | Effort | Improvement | Success measure / constraint |
 |---|---|---|---|
-| PERF-01 | CPU trial complete; full frame restored / M | Supported detector mask | Full archive audited. Guarded top-85% mask trial reduced quiet-scene recognition CPU by 13.1% (~4.77 points of whole-Pi capacity); originals and services restored. Mask also changes maximum candidate size and drops one edge pixel. Preserve candidate-size limits, verify read parity/arrival timing and remeasure before leaving enabled. |
+| PERF-01 | Deployed locally; observe real arrivals / M | Supported detector mask | Optional/default-off mask with compensated candidate-size limits. Fifteen difficult resized captures preserved all existing valid matches for the upper-85% mask. At 1080p recognition averages 115.92% of one core: 20.4% below the original high-resolution full-frame baseline. Guarded deployment verified; previous config retained. Small replay does not establish real-world accuracy. |
 | PERF-02 | L | Activity-adaptive recognition | Keep a low baseline analysis rate and burst during activity; measure heat/CPU and arrival latency; test slow vehicles, rain and shadows. Depends on REC-01. |
 | PERF-03 | Deployed; physical-screen observation pending | Small-screen preview profiles | One decoder publishes main 960×540, tablet 800×450 and kiosk 640×360 at 10fps. Main Live view retained; profiles optional. Pi measured ~9.9 distinct JPEGs/s; actual iPad/Pi smoothness remains to observe. Extra encoding adds about 2 percentage points of whole-Pi CPU. |
 | PERF-04 | Deferred / L | Modern video transport | Compare a compressed video relay for capable clients while retaining JPEG support for old displays; justify additional complexity with measurements. |
@@ -175,8 +175,9 @@ received full-resolution follow-up. One incomplete JPEG and three visibly damage
 frames are documented privately. A later guarded top-85% mask trial reduced
 quiet-scene recognition CPU by 13.1%; full-frame recognition was restored. The
 installed mask produces 15.08% fewer detector-search pixels and also lowers the
-maximum accepted candidate size. PERF-01 needs parity and timing evidence before
-normal deployment. Private captures and audit identifiers are excluded from GitHub.
+maximum accepted candidate size. A later compensated 1080p rollout passed a
+small replay and is now enabled locally, with real-arrival observation pending.
+Private captures and audit identifiers are excluded from GitHub.
 
 ## Wall-screen deployment verification — 2026-09-29
 

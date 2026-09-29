@@ -1,0 +1,13 @@
+config_file = {{ openalpr_share_dir }}/config/openalpr.defaults.conf
+runtime_dir = {{ openalpr_share_dir }}/runtime_data
+country = gb
+{% if alpr_detection_mask_source | length > 0 %}
+detection_mask_image = {{ alpr_detection_mask_path }}
+max_plate_width_percent = {{ alpr_mask_max_plate_width_percent }}
+max_plate_height_percent = {{ alpr_mask_max_plate_height_percent }}
+{% else %}
+max_plate_width_percent = 30
+max_plate_height_percent = 10
+{% endif %}
+topn = 5
+must_match_pattern = 1
