@@ -4,6 +4,12 @@ Keep the Pi's LAN-first operation, old iOS compatibility and existing relay
 behaviour intact. Track proposed work in [ROADMAP.md](ROADMAP.md); use its IDs
 in commits or issues. Add acceptance criteria before starting larger changes.
 
+Plain LAN HTTP is a supported operating mode. HTTPS and ACME are optional,
+disabled by default, and must not become prerequisites for camera viewing,
+history, allowlist editing or gate controls. HTTP-only installations need no
+domain, certificates or DNS credentials. Any future browser feature requiring
+a secure context must remain an optional enhancement to these core functions.
+
 ## Local checks
 
 ```sh

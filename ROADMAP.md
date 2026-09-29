@@ -5,6 +5,10 @@ update status and verification notes with each completed change, and link any
 GitHub issues here rather than maintaining a second independent list.
 Real captures, credentials, domains and household details belong in local files.
 
+Keep plain LAN HTTP fully supported throughout this roadmap. HTTPS/ACME remain
+opt-in and disabled by default; core features must work without a domain,
+certificates or DNS credentials. Secure-context browser enhancements are optional.
+
 Effort: **S** = contained change, **M** = several components, **L** = experiment or
 hardware work. These are relative sizes, not delivery estimates.
 
