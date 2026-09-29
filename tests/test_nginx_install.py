@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,8 @@ def test_https_off_retains_http_and_does_not_require_certificate():
     assert "listen 443" not in config
     assert "http2 on;" not in config
     assert "ssl_certificate" not in config
+    assert "gate_redirect_short_name" not in config
+    assert "return 302" not in config
     assert "example.com" not in config
     assert "gate.example.com" in _render_nginx(False, "gate.example.com")
 
@@ -44,6 +47,46 @@ def test_https_on_rejects_unknown_hosts_and_preserves_http_proxy_origin():
     assert "Strict-Transport-Security" not in config and "return 301" not in config and "return 308" not in config
     assert config.count("proxy_set_header Host $http_host;") == 4
     assert config.count("proxy_set_header X-Forwarded-Proto $scheme;") == 4
+
+
+@pytest.mark.parametrize(
+    ("host", "method", "path", "redirects"),
+    [
+        ("gatepi", "GET", "/", True),
+        ("gatepi", "HEAD", "/", True),
+        ("gatepi", "GET", "/index.html", True),
+        ("gatepi", "HEAD", "/index.html", True),
+        ("gatepi", "POST", "/", False),
+        ("gatepi", "PUT", "/index.html", False),
+        ("gatepi", "GET", "/api/config", False),
+        ("gatepi", "POST", "/api/open-gate", False),
+        ("gatepi", "GET", "/static/stream.jpg", False),
+        ("gatepi", "GET", "/fullscreen", False),
+        ("gatepi", "GET", "/app.js", False),
+        ("192.168.1.10", "GET", "/", False),
+        ("127.0.0.1", "GET", "/", False),
+        ("localhost", "GET", "/", False),
+        ("gatepi.local", "GET", "/", False),
+        ("gate", "GET", "/", False),
+        ("gate.example.com", "GET", "/", False),
+        ("unknown.example.com", "GET", "/", False),
+    ],
+)
+def test_short_name_redirect_map_preserves_existing_http_clients(host, method, path, redirects):
+    config = _render_nginx(True, "gate.example.com")
+    mapping = re.search(r'map "\$host:\$request_method:\$uri" \$gate_redirect_short_name \{([^}]+)\}', config)
+    assert mapping and "default 0;" in mapping[1]
+    entries = set(re.findall(r'"([^"]+)" 1;', mapping[1]))
+    assert (f"{host}:{method}:{path}" in entries) is redirects
+
+
+def test_redirect_is_uncached_http_only_and_uses_fixed_domain_with_original_query():
+    config = _render_nginx(True, "gate.example.com")
+    redirect = 'add_header Cache-Control "no-store";\n            return 302 https://gate.example.com$request_uri;'
+    assert config.count(redirect) == 1
+    assert redirect in config.split("# Reject unknown TLS names")[0]
+    assert "return 302" not in config.split("# Reject unknown TLS names")[1]
+    assert "return 302 https://$host" not in config
 
 
 def _paths(tmp_path):

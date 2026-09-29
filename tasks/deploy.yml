@@ -717,6 +717,7 @@
   tags:
     - deploy
     - web
+    - nginx
 
 - name: Install stream watchdog script
   copy:

@@ -288,7 +288,7 @@ reach the UI via an extra hostname (e.g. a reverse proxy), add it to the
 
 ## Optional HTTPS
 
-HTTP by IP address, `.local` name and the existing screen bookmarks stays
+HTTP by IP address, `.local` name and the dedicated screen pages stays
 available. HTTPS is disabled by default and only serves a configured DNS hostname.
 Make that hostname resolve to the Pi on your LAN. DNS-01 certificate validation
 uses public DNS records and does not require exposing the Pi or forwarding ports.
@@ -360,9 +360,20 @@ self-signed fallback. The nginx candidate is tested against the complete nginx
 configuration before reload, with previous files and links restored if validation
 fails.
 
-Visit `https://gate.example.com/` for HTTPS; keep existing `http://` IP and local
-hostname URLs for the screens. Unknown TLS hostnames and HTTP Host values are
-rejected. No redirects or HSTS force existing HTTP screens onto HTTPS.
+Visit `https://gate.example.com/` for HTTPS. With HTTPS enabled, opening the Pi's
+bare-hostname homepage (for example `http://gatepi/` or `http://gatepi/index.html`)
+redirects to the configured HTTPS domain, preserving the query and browser
+fragment. Only GET/HEAD homepage requests redirect: HTTP API calls, image streams,
+dedicated screen pages, IP addresses and `.local` URLs keep working directly.
+The temporary redirect is not cached, and no HSTS is set. Publicly trusted
+certificates cannot cover bare internal hostnames, so `https://gatepi/` cannot
+redirect before TLS validation; start with `http://gatepi/` or the full HTTPS URL.
+Unknown TLS hostnames and HTTP Host values are rejected.
+
+For nginx-only changes on an already provisioned Pi, run the playbook with
+`--tags nginx`; this validates and reloads nginx without restarting the app.
+This shortcut assumes the current certificate and stream path are already
+configured; use `--tags web` for HTTPS setup, certificate or stream-setting changes.
 
 To disable HTTPS, set `GATE_HTTPS_ENABLED=false` and deploy again. Certificate and
 credential checks are skipped, the automatic renewal timer is stopped and
