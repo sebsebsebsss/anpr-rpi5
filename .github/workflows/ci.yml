@@ -35,7 +35,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install ruff pytest flask waitress requests Pillow==12.3.0
+          pip install -r files/requirements.txt ruff pytest
 
       - name: Lint (ruff check)
         run: ruff check files/ tests/

@@ -6,6 +6,9 @@ This project turns a Pi into a practical gate controller that reads an RTSP came
 recognises number plates, opens for allowlisted vehicles, and keeps an auditable
 history with images and timings.
 
+Planned work and acceptance criteria are tracked in [ROADMAP.md](ROADMAP.md).
+Development and public contribution checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ![Gatepi ANPR UI](docs/UI.png)
 
 ## Who this is for
@@ -255,7 +258,7 @@ plate images are not committed to this repo for privacy:
 ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_openalpr_smoketest=true -e openalpr_test_image_path="tests/test.jpeg"
 ```
 
-Synthetic queue job:
+Synthetic job preview (prints JSON without sending anything to the worker):
 
 ```sh
 ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_synthetic_job=true
@@ -264,8 +267,13 @@ ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml 
 With overrides:
 
 ```sh
-ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_synthetic_job=true -e synthetic_plate=A1ABC -e synthetic_delay=60
+ansible-playbook -i inventory.ini -e ansible_user="$GATEPI_USER" site-tests.yml -e run_synthetic_job=true -e synthetic_plate=A1ABC -e synthetic_delay=-60
 ```
+
+To deliberately send the test job to the real queue, additionally set
+`-e synthetic_enqueue=true` (or pass `--enqueue` to the Python helper).
+An allowed plate can operate the relay and send notifications. Ordinary unit
+tests mock these outputs, and browser smoke tests block mutating requests.
 
 ## Web UI
 Default URL:

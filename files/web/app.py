@@ -404,7 +404,7 @@ def _read_allowlist():
 
 # Cache the normalised-key -> registered-plate map, rebuilt when the allowlist
 # file changes. Recognition matches on the normalised (OCR-confusable-folded)
-# key, so a plate registered as "S3BPN" is stored/grouped as "538PN". For
+# key, so a plate registered as "SB12XYZ" is stored/grouped as "5812XY2". For
 # display we always resolve back to the plate exactly as entered in admin;
 # the recorded value is never trusted, since what the camera saw may be wrong.
 _display_cache = {"mtime": None, "map": {}}

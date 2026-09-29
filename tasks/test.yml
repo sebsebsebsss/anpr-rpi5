@@ -63,12 +63,14 @@
   tags:
     - test
 
-- name: Enqueue synthetic ALPR job (optional)
-  command: >
-    {{ venv_path }}/bin/python {{ app_dir }}/tests/synthetic_job.py
-    --plate {{ synthetic_plate | default('A1ABC') }}
-    --delay {{ synthetic_delay | default(60) }}
+- name: Preview synthetic ALPR job (enqueue only when explicitly requested)
+  command:
+    argv: >-
+      {{ [venv_path + '/bin/python', app_dir + '/tests/synthetic_job.py',
+          '--plate', synthetic_plate | default('A1ABC'),
+          '--delay', (synthetic_delay | default(0)) | string]
+         + (['--enqueue'] if synthetic_enqueue | default(false) | bool else []) }}
   when: (run_synthetic_job | default(false)) | bool
-  changed_when: false
+  changed_when: synthetic_enqueue | default(false) | bool
   tags:
     - test

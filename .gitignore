@@ -12,6 +12,24 @@ __pycache__/
 .ruff_cache/
 tmp/
 tests/Test\ Image.png
-*.jpeg
-*.jpg
-*.png
+# Private captures, recordings and generated runtime state.
+*.[jJ][pP][eE][gG]
+*.[jJ][pP][gG]
+*.[pP][nN][gG]
+*.mp4
+*.mkv
+*.avi
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+*.log.*
+.env
+*.key
+*.pem
+*.p12
+*.pfx
+# Deliberately public illustration and application icons.
+!docs/UI.png
+!files/web/static/icons/*.png
