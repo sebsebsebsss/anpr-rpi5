@@ -12,6 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test image stream refresh
+        run: node tests/stream_refresh.js
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

@@ -327,18 +327,35 @@ function createLegacyStreamImage(url) {
   img.alt = "Live stream";
   img.className = "stream-image-single";
   let timer = null;
+  let requestTimeout = null;
   const schedule = (delay) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(loadNext, delay);
   };
+  const finish = (delay) => {
+    clearTimeout(requestTimeout);
+    img.onload = null;
+    img.onerror = null;
+    schedule(delay);
+  };
   const loadNext = () => {
-    if (state.gateOpenInFlight) {
+    if (document.hidden || state.gateOpenInFlight) {
       schedule(Math.max(250, STREAM_REFRESH_MS));
       return;
     }
+    // Wait for this frame before requesting another. Replacing src on a
+    // fixed timer can continually cancel slow loads on older iPads.
+    img.onload = () => finish(Math.max(100, STREAM_REFRESH_MS));
+    img.onerror = () => finish(Math.max(1000, STREAM_REFRESH_MS));
+    // Recover even when WebKit never delivers a load/error event.
+    requestTimeout = setTimeout(() => {
+      img.onload = null;
+      img.onerror = null;
+      img.removeAttribute("src");
+      finish(Math.max(1000, STREAM_REFRESH_MS));
+    }, 10000);
     const sep = url.includes("?") ? "&" : "?";
     img.src = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
-    schedule(Math.max(100, STREAM_REFRESH_MS));
   };
   loadNext();
   return img;
