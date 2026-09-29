@@ -153,7 +153,7 @@ def main():
                 route.fulfill(json=fixture["plates"])
             return
         apis = {
-            "/api/config": {"stream_fps": 5, "group_window_sec": 60},
+            "/api/config": {"stream_fps": 10, "group_window_sec": 60},
             "/api/ui-settings": {"theme_mode": "light"},
             "/api/stream": {
                 "url": "/static/stream.jpg",
@@ -207,7 +207,14 @@ def main():
         wall_measurements = []
 
         def ready():
-            page.wait_for_function("document.getElementById('tablet-stream-status').textContent === 'View updating'")
+            page.wait_for_function(r"""() => {
+                const badge = document.getElementById('tablet-stream-status');
+                return badge.classList.contains('status-ok') && /^View \d+\.\d FPS$/.test(badge.textContent);
+            }""")
+            require(
+                page.locator("#tablet-source-status").inner_text() == "Pi frame fresh",
+                "the source-freshness pill must remain alongside the view FPS",
+            )
             expected_width = 640 if urlsplit(page.url).path == "/fullscreen" else 800
             page.wait_for_function(
                 "width => document.querySelector('#tablet-stream-frame img').naturalWidth === width",
@@ -218,8 +225,11 @@ def main():
                 page.locator("#tablet-timeline-list .tablet-timeline-row").count() == 2, "recognised arrivals missing"
             )
 
-        def wall_geometry():
-            return page.evaluate("""() => {
+        def wall_geometry(fps_label=None):
+            return page.evaluate("""fpsLabel => {
+              const badge = document.getElementById('tablet-stream-status');
+              const originalLabel = badge.textContent;
+              if (fpsLabel) badge.textContent = fpsLabel;
               const rect = selector => {
                 const element = document.querySelector(selector);
                 const box = element.getBoundingClientRect();
@@ -231,12 +241,16 @@ def main():
               const contents = Array.from(document.querySelectorAll(
                 '.tablet-grid > .card > *, .tablet-timeline-row, .home-health'
               )).filter(element => element.getClientRects().length);
-              return {
+              const pills = Array.from(document.querySelector('.home-health').children)
+                .map(element => element.getBoundingClientRect());
+              const geometry = {
                 documentHeight: document.documentElement.scrollHeight,
                 viewportHeight: innerHeight,
                 scrollY,
                 button: rect('#open-gate-tablet'),
                 camera: rect('#tablet-stream-frame'),
+                healthPillsInOneRow: pills.length === 3 && pills.every(box =>
+                  Math.abs((box.top + box.bottom) / 2 - (pills[0].top + pills[0].bottom) / 2) <= 1),
                 panelsFit: panels.every(element => {
                   const box = element.getBoundingClientRect();
                   const style = getComputedStyle(element);
@@ -252,7 +266,9 @@ def main():
                     box.left >= card.left - 1 && box.right <= card.right + 1;
                 }),
               };
-            }""")
+              if (fpsLabel) badge.textContent = originalLabel;
+              return geometry;
+            }""", fps_label)
 
         def check_wall_layout():
             size = page.viewport_size
@@ -264,6 +280,16 @@ def main():
             require(geometry["scrollY"] == 0, "wall Home must remain at the top of its viewport")
             require(geometry["panelsFit"], "wall panels must fit without scrolling or hiding overflow")
             require(geometry["contentsFit"], "wall content extends outside its card")
+            require(geometry["healthPillsInOneRow"], "wall status pills must remain on one row")
+            # Actual scheduling can report 9.8 or 9.9 FPS. Exercise the wider
+            # two-digit rate without changing the stream or waiting for luck.
+            full_rate = wall_geometry("View 10.0 FPS")
+            require(full_rate["healthPillsInOneRow"], "10.0 FPS must not wrap the wall status pills")
+            require(full_rate["contentsFit"], "10.0 FPS must fit inside the live-view card")
+            require(
+                full_rate["camera"] == geometry["camera"] and full_rate["button"] == geometry["button"],
+                "the FPS digit count must not move the camera or shrink the gate target",
+            )
             decision = page.locator("#home-decision .decision-summary")
             if decision.count():
                 require(

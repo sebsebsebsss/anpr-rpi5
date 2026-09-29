@@ -1763,7 +1763,15 @@ function renderHomeStatus() {
   const badge = document.getElementById("tablet-stream-status");
   if (!badge) return;
   const frame = state.homeFrame;
-  const frameAge = frame && frame.loadedAt !== null ? Math.max(0, Date.now() - frame.loadedAt) : null;
+  const measuredAt = Date.now();
+  const frameAge = frame && frame.loadedAt !== null ? Math.max(0, measuredAt - frame.loadedAt) : null;
+  const hasLoadSamples = frame && Array.isArray(frame.loadTimes);
+  const duration = hasLoadSamples ? Math.min(DISPLAY_LOAD_WINDOW_MS, Math.max(0, measuredAt - frame.startedAt)) : 0;
+  let displayRate = null;
+  if (hasLoadSamples && duration >= 1000) {
+    const recentLoads = frame.loadTimes.filter((time) => time > measuredAt - DISPLAY_LOAD_WINDOW_MS && time <= measuredAt).length;
+    displayRate = (recentLoads * 1000 / duration).toFixed(1);
+  }
   const snapshot = state.homeStatus;
   const current = homeStatusIsCurrent();
   const now = homeServerNow();
@@ -1773,7 +1781,7 @@ function renderHomeStatus() {
   const sourceAge = Number.isFinite(stream.age_seconds) && stream.age_seconds >= 0
     ? stream.age_seconds : null;
   const threshold = Number.isFinite(stream.stale_after_seconds) ? stream.stale_after_seconds : 15;
-  let label = "View updating";
+  let label = displayRate === null ? "View updating" : `View ${displayRate} FPS`;
   let kind = "ok";
   if (state.homeStreamError) {
     label = state.homeStreamError;
@@ -1796,6 +1804,7 @@ function renderHomeStatus() {
   }
   if (badge.textContent !== label) badge.textContent = label;
   badge.className = `live-badge status-${kind}`;
+  badge.title = "FPS counts completed JPEG loads over up to five seconds, including repeated camera frames. Tap for details.";
   const serviceLabels = { alprd: "Recognition service", gate_anpr: "Gate worker", stream_jpeg: "Frame service", beanstalkd: "Queue" };
   const servicesCurrent = current && Number.isFinite(snapshot.services_checked_at) && now - snapshot.services_checked_at <= 20;
   const services = snapshot && snapshot.services || {};
@@ -1841,12 +1850,9 @@ function renderHomeStatus() {
     if (frame && frame.width > 0 && frame.height > 0) {
       parts.push(`JPEG ${frame.width}×${frame.height}`);
     }
-    if (frame && Array.isArray(frame.loadTimes)) {
-      const measuredAt = Date.now();
-      const duration = Math.min(DISPLAY_LOAD_WINDOW_MS, Math.max(0, measuredAt - frame.startedAt));
-      if (duration >= 1000) {
-        const recentLoads = frame.loadTimes.filter((time) => time > measuredAt - DISPLAY_LOAD_WINDOW_MS && time <= measuredAt).length;
-        parts.push(`Image loads ${(recentLoads * 1000 / duration).toFixed(1)}/s (last ${Math.round(duration / 1000)}s; not distinct frames)`);
+    if (hasLoadSamples) {
+      if (displayRate !== null) {
+        parts.push(`Image loads ${displayRate}/s (last ${Math.round(duration / 1000)}s; not distinct frames)`);
       } else {
         parts.push("Measuring image loads…");
       }

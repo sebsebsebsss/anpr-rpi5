@@ -41,8 +41,11 @@ Extra encodes have a server CPU cost, even though smaller downloads and fewer
 pixels can make old clients smoother. This is a display experiment, not a claim
 of a large cooling improvement. Home's existing disclosure now reports actual
 visible CSS viewport, loaded JPEG size and a bounded five-second image-load
-rate. That rate can include repeated camera frames. The configured 10fps output
-also cannot create extra captured motion from a slower source.
+rate. The healthy view pill also shows this as `View 10.0 FPS`, alongside the
+separate source-freshness and service pills. Errors and stale-source warnings
+take priority over the rate. FPS counts completed JPEG loads, including repeated
+camera frames; the configured 10fps output cannot create extra captured motion
+from a slower source. This display reuses existing samples and refresh timers.
 
 A five-second synthetic test on the actual Pi produced 47/46/46 distinct frames
 for the three outputs, with the expected dimensions and **zero partial JPEGs**

@@ -115,9 +115,11 @@ def main():
                 require(page.evaluate("typeof LEGACY_IOS !== 'undefined' && LEGACY_IOS"), "legacy_user_agent_detection")
             stream_path = page.locator("#tablet-stream-frame img").evaluate("image => new URL(image.src).pathname")
             stage = "home_status"
-            page.wait_for_function("""() => state.homeStatus && state.homeFrame &&
-                state.homeFrame.loadedAt !== null &&
-                document.getElementById('tablet-stream-status').textContent === 'View updating'
+            page.wait_for_function(r"""() => {
+                const badge = document.getElementById('tablet-stream-status');
+                return state.homeStatus && state.homeFrame && state.homeFrame.loadedAt !== null &&
+                    badge.classList.contains('status-ok') && /^View \d+\.\d FPS$/.test(badge.textContent);
+            }
             """)
             home = page.evaluate("""() => ({
                 known: document.querySelectorAll('#tablet-timeline-list .tablet-timeline-row').length,

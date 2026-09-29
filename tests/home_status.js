@@ -255,18 +255,26 @@ function checkDisplayDiagnostics() {
   test.app.state.homeFrame = image.gateFrameState;
   applySnapshot(test);
   const detail = () => test.nodes["tablet-system-status"].textContent;
+  const pill = () => test.nodes["tablet-stream-status"].textContent;
   image.onload();
   test.app.renderHomeStatus();
   assert(detail().includes("Viewport 1024×748 CSS px"), "On-device details must report CSS viewport dimensions");
   assert(detail().includes("JPEG 800×450"), "Report the loaded image's real dimensions");
   assert(detail().includes("Measuring image loads"), "Do not invent a rate before the first sampling interval");
+  assert(pill() === "View updating", "Wait for a sampling interval before showing FPS");
   for (let index = 0; index < 25; index++) {
     test.advance(200);
     image.onload();
   }
   test.app.renderHomeStatus();
   assert(detail().includes("Image loads 5.0/s (last 5s; not distinct frames)"), "Load count must be labelled separately from distinct camera frames");
+  assert(pill() === "View 5.0 FPS", "Show the measured image load rate on the healthy view pill");
+  assert(test.nodes["tablet-stream-status"].title.includes("repeated camera frames"), "Explain that FPS counts loads, not distinct frames");
   assert(image.gateFrameState.loadTimes.length === 25, "Only recent completed loads should remain in memory");
+  test.app.state.homeStatus.stream.fresh = false;
+  test.app.renderHomeStatus();
+  assert(pill() === "Source stale", "Successful image loads must not conceal a stale producer");
+  test.app.state.homeStatus.stream.fresh = true;
   test.window.innerHeight = 704;
   test.app.renderHomeStatus();
   assert(detail().includes("Viewport 1024×704 CSS px"), "Diagnostics must reflect Safari's reduced visible height");
@@ -276,6 +284,7 @@ function checkDisplayDiagnostics() {
   test.advance(5200);
   test.app.renderHomeStatus();
   assert(detail().includes("Image loads 0.0/s"), "Recent load rate must fall to zero when no new image loads");
+  assert(pill() === "View interrupted", "An image error must take priority over the FPS number");
   assert(image.gateFrameState.loadTimes.length === count, "Rendering diagnostics must not mutate the on-load sample buffer");
   image.naturalWidth = 640;
   image.naturalHeight = 360;
@@ -283,6 +292,7 @@ function checkDisplayDiagnostics() {
   test.app.renderHomeStatus();
   assert(detail().includes("JPEG 640×360"), "A new image profile must update displayed JPEG dimensions");
   assert(image.gateFrameState.loadTimes.length === 1, "A resumed load must discard old samples");
+  assert(pill() === "View 0.2 FPS", "After a pause, show the recent rate rather than the old healthy FPS");
 }
 
 function checkArrivalExpiryAndDecisions() {
