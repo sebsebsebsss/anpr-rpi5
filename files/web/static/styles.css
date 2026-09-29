@@ -861,13 +861,10 @@ body.fullscreen-page .home-unfamiliar img {
 .tablet-gate .gate-button {
   width: 90%;
   font-size: 1.6rem;
-  border-radius: 32px;
-  background: linear-gradient(180deg, #34b46b 0%, #1e8a4e 100%);
-  box-shadow:
-    0 20px 35px rgba(18, 108, 59, 0.35),
-    0 8px 0 rgba(13, 78, 42, 0.75),
-    inset 0 2px 0 rgba(255, 255, 255, 0.35),
-    inset 0 -8px 16px rgba(0, 0, 0, 0.25);
+  border-radius: 24px;
+  border: 1px solid #459c7c;
+  background: linear-gradient(165deg, #2d896b 0%, #26795d 48%, #206b51 100%);
+  box-shadow: 0 3px 0 #123f30, inset 0 1px 0 rgba(255, 255, 255, 0.13);
   align-self: center;
   justify-self: center;
   flex: 1 1 auto;
@@ -875,6 +872,17 @@ body.fullscreen-page .home-unfamiliar img {
   max-height: 420px;
   margin-top: 12px;
   margin-bottom: 12px;
+}
+
+/* Decorative so status/cooldown text can change without replacing the icon. */
+.tablet-gate .gate-button::before {
+  content: "";
+  display: block;
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 18px;
+  opacity: 0.85;
+  background: center / contain no-repeat url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' fill='none' stroke='white' stroke-width='2'%3E%3Cpath d='M6 8v33M42 8v33M10 14h28v24H10zM17 14v24M24 14v24M31 14v24'/%3E%3C/svg%3E");
 }
 
 .tablet-gate .gate-status {
@@ -885,13 +893,15 @@ body.fullscreen-page .home-unfamiliar img {
   margin-top: auto;
 }
 
-.tablet-gate .gate-button:active {
-  transform: translateY(4px);
-  box-shadow:
-    0 12px 24px rgba(18, 108, 59, 0.28),
-    0 4px 0 rgba(13, 78, 42, 0.75),
-    inset 0 2px 0 rgba(255, 255, 255, 0.35),
-    inset 0 -6px 12px rgba(0, 0, 0, 0.22);
+.tablet-gate .gate-button:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 #123f30, inset 0 1px 6px rgba(0, 0, 0, 0.12);
+}
+
+.tablet-gate .gate-button--opening {
+  background: #d28a1e;
+  border-color: #d8a34a;
+  box-shadow: 0 3px 0 #8d5b12, inset 0 1px 0 rgba(255, 255, 255, 0.13);
 }
 
 .gate-status {
@@ -1943,10 +1953,6 @@ textarea {
   white-space: nowrap;
 }
 
-.tablet-gate .gate-button {
-  box-shadow: 0 5px 0 #145d36, inset 0 1px 0 rgba(255, 255, 255, 0.25);
-}
-
 /* Wall Home fills the available viewport. Keep overflow visible so a layout
    regression cannot silently clip the camera, arrivals, or gate controls. */
 @media (min-width: 900px) {
@@ -2242,6 +2248,14 @@ textarea {
     margin: 0 0 5px;
     border-radius: 14px;
     font-size: 1.3rem;
+  }
+
+  body.main-page .tablet-gate .gate-button::before {
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    margin: 0 12px 0 0;
+    vertical-align: middle;
   }
 
   body.main-page .tablet-gate .gate-last {

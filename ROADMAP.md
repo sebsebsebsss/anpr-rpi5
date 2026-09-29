@@ -57,6 +57,11 @@ A rejected alternative is archived in [docs/design/alternative.html](docs/design
 Its proposed comparison/relay-total metrics are demo-only. The selected
 UX-10/UX-11 implementation is on `design/device-layout-and-insights`.
 
+The approved gate-button finish is soft emerald, with a subtle gradient,
+shallow raised edge and gate icon. Wall-screen touch targets and layout dimensions are
+preserved; opening remains amber and disabled buttons do not depress. Browser
+checks cover the iPad/Safari-banner sizes, Pi kiosks, phones and both themes.
+
 | ID | Priority / effort | Improvement | Acceptance criteria / dependency |
 |---|---|---|---|
 | REL-01 | High / M | Persist automatic-opening cooldown | Restarting the worker cannot permit a second pulse inside the configured vehicle cooldown; cover uncertain actuation outcomes. |
