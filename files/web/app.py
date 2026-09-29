@@ -256,6 +256,28 @@ def require_api_secret():
     return jsonify({"error": "forbidden"}), 401
 
 
+def _origin_tuple(value):
+    """Normalize an HTTP origin, including its scheme and effective port."""
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+        return parsed.scheme, parsed.hostname.lower(), port
+    except ValueError:
+        return None
+
+
 def _check_csrf():
     """Same-origin check on Origin (falling back to Referer) for mutating endpoints.
 
@@ -263,10 +285,10 @@ def _check_csrf():
     spoof it. A cross-site form submission from evil.com carries
     Origin: https://evil.com and is rejected here.
 
-    The primary rule is same-origin: the Origin host must match the Host header
-    of this request — this works regardless of which hostname, avahi alias, or
-    raw IP the client used to reach the UI. GATE_ALLOWED_ORIGINS adds explicit
-    extra origins (e.g. a reverse proxy on another name) on top of that.
+    Scheme, hostname and effective port must all match. nginx preserves Host
+    and overwrites X-Forwarded-Proto; Waitress trusts that header only from the
+    loopback proxy, so request.scheme describes the client's HTTP/TLS origin.
+    GATE_ALLOWED_ORIGINS adds explicit exceptions on top of this rule.
     """
     from urllib.parse import urlparse
 
@@ -274,23 +296,25 @@ def _check_csrf():
     if not origin:
         ref = request.headers.get("Referer", "").strip()
         if ref:
-            parsed = urlparse(ref)
-            origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            try:
+                parsed = urlparse(ref)
+                origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            except ValueError:
+                origin = ""
     if not origin:
         log.warning("CSRF check failed: no Origin or Referer header on %s %s", request.method, request.path)
         return jsonify({"error": "forbidden"}), 403
 
-    origin_host = urlparse(origin).netloc.lower()
-    request_host = request.host.lower()
-    # Same-origin: host (incl. port) matches however the client addressed us.
-    if origin_host and (origin_host == request_host or origin_host == request_host.split(":")[0]):
+    request_origin = request.host_url.rstrip("/")
+    normalized_origin = _origin_tuple(origin)
+    if normalized_origin is not None and normalized_origin == _origin_tuple(request_origin):
         return None
     if origin in ALLOWED_ORIGINS:
         return None
     log.warning(
-        "CSRF check failed: origin %r does not match host %r and is not in allowlist on %s %s",
+        "CSRF check failed: origin %r does not match request origin %r and is not in allowlist on %s %s",
         origin,
-        request_host,
+        request_origin,
         request.method,
         request.path,
     )

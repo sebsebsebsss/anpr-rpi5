@@ -1,4 +1,10 @@
 ---
+- name: Validate optional HTTPS before deployment changes
+  import_tasks: https.yml
+  tags:
+    - deploy
+    - web
+
 - name: Ensure plates directory exists
   file:
     path: "{{ plates_dir }}"
@@ -666,7 +672,7 @@
       User=pi
       WorkingDirectory={{ app_dir }}/web
       EnvironmentFile=-/etc/gate_anpr.env
-      ExecStart={{ venv_path }}/bin/waitress-serve --listen=127.0.0.1:8080 app:app
+      ExecStart={{ venv_path }}/bin/waitress-serve --listen=127.0.0.1:8080 --trusted-proxy=127.0.0.1 --trusted-proxy-headers=x-forwarded-proto app:app
       # Waitress catches SIGINT and drains its request threads, allowing an
       # in-flight relay pulse to finish its finally block before shutdown.
       KillSignal=SIGINT
@@ -706,34 +712,11 @@
   tags:
     - deploy
 
-- name: Remove default nginx site
-  file:
-    path: /etc/nginx/sites-enabled/default
-    state: absent
-  notify: reload nginx
-  tags:
-    - deploy
-
-- name: Deploy nginx site config for gate-anpr
-  template:
-    src: "{{ playbook_dir }}/files/nginx/gate-anpr.conf"
-    dest: /etc/nginx/sites-available/gate-anpr.conf
-    owner: root
-    group: root
-    mode: "0644"
-  notify: reload nginx
+- name: Deploy validated nginx configuration
+  import_tasks: nginx.yml
   tags:
     - deploy
     - web
-
-- name: Enable nginx gate-anpr site
-  file:
-    src: /etc/nginx/sites-available/gate-anpr.conf
-    dest: /etc/nginx/sites-enabled/gate-anpr.conf
-    state: link
-  notify: reload nginx
-  tags:
-    - deploy
 
 - name: Install stream watchdog script
   copy:

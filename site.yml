@@ -42,6 +42,11 @@
     gate_backup_database: false
     gate_replace_env: false
     gate_stream_overrides: {}
+    gate_https_enabled: "{{ lookup('env', 'GATE_HTTPS_ENABLED') | default('false', true) | bool }}"
+    gate_https_domain: "{{ lookup('env', 'GATE_HTTPS_DOMAIN') | default('', true) | trim | lower }}"
+    gate_https_cert_path: "{{ lookup('env', 'GATE_HTTPS_CERT_PATH') | default('/etc/gate-anpr/tls/fullchain.pem', true) }}"
+    gate_https_key_path: "{{ lookup('env', 'GATE_HTTPS_KEY_PATH') | default('/etc/gate-anpr/tls/privkey.pem', true) }}"
+    gate_https_min_valid_seconds: 86400
 
     gatepi_alias_hostname: "{{ lookup('env', 'GATEPI_ALIAS_HOSTNAME') | default('gate', true) }}"
     run_openalpr_smoketest: false

@@ -286,6 +286,52 @@ with no response. This blocks DNS-rebinding attacks against the API. If you
 reach the UI via an extra hostname (e.g. a reverse proxy), add it to the
 `server_name` list in `files/nginx/gate-anpr.conf`.
 
+## Optional HTTPS
+
+HTTP by IP address, `.local` name and the existing screen bookmarks stays
+available. HTTPS is disabled by default and only serves a configured DNS hostname.
+To enable it, first obtain a trusted certificate for a name you own, such as
+`gate.example.com`, and make that hostname resolve to the Pi on your LAN.
+
+A public CA's DNS-01 challenge can issue a certificate without exposing the Pi
+to the internet. Automated renewal needs a compatible DNS API or delegation of
+the challenge record to a supported DNS provider. Domain registration alone
+does not provide that automation; this repository does not issue certificates
+or claim that renewal is configured.
+
+Install the issued full certificate chain and private key on the Pi, keeping the
+private key root-owned with mode `0600`. Set these controller settings in the
+gitignored `ansible.env` and export them as described above:
+
+```ini
+GATE_HTTPS_ENABLED=true
+GATE_HTTPS_DOMAIN=gate.example.com
+GATE_HTTPS_CERT_PATH=/etc/gate-anpr/tls/fullchain.pem
+GATE_HTTPS_KEY_PATH=/etc/gate-anpr/tls/privkey.pem
+```
+
+For iOS 12 screens, use a complete chain compatible with ISRG Root X1;
+native ISRG Root X2 trust requires iOS 16 or later.
+
+Deploy with the usual `--tags deploy` or `--tags web`. Before changing the running
+application, deployment verifies the trusted chain using the Pi's CA store,
+hostname, certificate lifetime and matching private key. Certificates need at
+least one day of remaining validity. Missing, self-signed or otherwise untrusted
+certificates are rejected; there is no self-signed fallback. The nginx candidate
+is tested against the complete nginx configuration before reload, with previous
+files and links restored if validation fails.
+
+Visit `https://gate.example.com/` for HTTPS; use existing `http://` IP and local
+hostname URLs for the screens. Unknown TLS hostnames and HTTP Host values are
+rejected. No redirects or HSTS force existing HTTP screens onto HTTPS.
+
+To disable HTTPS, set `GATE_HTTPS_ENABLED=false` and deploy again. Certificate
+checks are then skipped and the TLS listener is removed; HTTP keeps working.
+After an external certificate renewal, validate and deploy again, then run
+`sudo nginx -t && sudo systemctl reload nginx` to load the renewed certificate
+even when its path has not changed (or provide an equivalent checked renewal
+hook). Keep renewal monitored before relying on HTTPS for unattended screens.
+
 ## Stream settings
 In `/etc/gate_anpr.env` (or local `files/gate_anpr.env` then deploy with
 `-e gate_replace_env=true`):
