@@ -122,15 +122,18 @@ def main():
             }
             """)
             home = page.evaluate("""() => ({
-                known: document.querySelectorAll('#tablet-timeline-list .tablet-timeline-row').length,
-                unfamiliar: document.getElementById('home-unfamiliar').hidden ? 0 : 1,
-                previewOnly: Array.from(document.querySelectorAll('#home-unfamiliar img')).every(image =>
+                arrivals: document.querySelectorAll('#tablet-timeline-list .tablet-timeline-row').length,
+                unfamiliar: document.querySelectorAll('#tablet-timeline-list .arrival-kind').length,
+                previewOnly: Array.from(document.querySelectorAll('#tablet-timeline-list img')).every(image =>
                     (image.getAttribute('src') || '').startsWith('/previews/'))
             })""")
-            require(home["known"] <= 2 and home["unfamiliar"] <= 1, "home_arrivals_bounded")
+            require(home["arrivals"] <= 2 and home["unfamiliar"] <= home["arrivals"], "home_arrivals_bounded")
             require(home["previewOnly"], "home_arrival_preview_urls")
             summary.update(
-                home_status_checked=True, home_known_count=home["known"], home_unfamiliar_count=home["unfamiliar"]
+                home_status_checked=True,
+                home_arrival_count=home["arrivals"],
+                home_known_count=home["arrivals"] - home["unfamiliar"],
+                home_unfamiliar_count=home["unfamiliar"],
             )
             stage = "homepage_stream"
             before = page.evaluate("window.__gateSmoke.homeLoads")

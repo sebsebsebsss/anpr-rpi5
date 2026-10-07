@@ -46,7 +46,7 @@ function setup({ abortAvailable = true } = {}) {
   }
   const nodes = {};
   ["tab-home", "tab-candidates", "tablet-stream-status", "tablet-system-status", "tablet-source-status", "tablet-service-status", "tablet-timeline-list",
-    "home-unfamiliar", "home-unfamiliar-age", "home-decision", "home-decision-age", "home-arrival-status",
+    "home-arrival-status", "home-cpu-temp", "home-processing", "home-confidence", "home-disk-free",
     "allowlist-status", "save-plates", "add-plate", "plates-list"].forEach((id) => { nodes[id] = node(id); });
   nodes["tab-home"].classList.add("active");
   const fields = [nodes["save-plates"], nodes["add-plate"], node("owner-input")];
@@ -113,7 +113,7 @@ function setup({ abortAvailable = true } = {}) {
     dispatch: node("").dispatch };
   const app = new Function("document", "window", "navigator", "fetch", "Date", "Image", "AbortController",
     "setTimeout", "clearTimeout", "history", source + `
-      return { state, createLegacyStreamImage, renderHomeStatus, renderHomeArrivals, fetchHomeStatus,
+      return { state, createLegacyStreamImage, renderHomeStatus, renderHomeArrivals, renderHomeMetrics, fetchHomeStatus,
         homeServerNow, describeDecision, pollVisibleTab, setActiveTab, saveAllowlist, markAllowlistChanged,
         renderTabletTimeline, updateTabletTimelineRelativeTimes, initHomeViewport };
     `)(document, window, { userAgent: "iPad; CPU OS 12_5_8 like Mac OS X" }, fetch, Clock, Image,
@@ -163,7 +163,7 @@ function snapshot(overrides = {}) {
     services_checked_at: 1900000000,
     stream: { age_seconds: 1, fresh: true, stale_after_seconds: 15 },
     services: { alprd: "active", gate_anpr: "active", stream_jpeg: "active", beanstalkd: "active" },
-    recognised: [], unfamiliar: [], recent_decisions: [], decisions_available: true,
+    arrivals: [],
     ...overrides,
   };
 }
@@ -306,50 +306,139 @@ function checkDisplayDiagnostics() {
   assert(pill() === "View 0.2 FPS", "After a pause, show the recent rate rather than the old healthy FPS");
 }
 
-function checkArrivalExpiryAndDecisions() {
+async function checkLatestSeenArrivals() {
   const test = setup();
-  const event = { id: 1, plate: '<img src=x onerror="fail()">', seen_at: 1899999900, expires_at: 1900000200,
-    image_url: "/images/original.jpg", thumbnail_url: "/previews/thumb.jpg?size=160" };
+  const unfamiliar = {
+    id: 1, kind: "unmatched", plate: '<img src=x onerror="fail()">',
+    captured_at: "2030-03-17 11:58:20", seen_at: 1899999900,
+    image_url: "/images/original.jpg", thumbnail_url: "/previews/thumb.jpg?size=160",
+  };
+  const recognised = {
+    id: 2, kind: "recognised", plate: "OLD123", owner: "Someone & Co",
+    seen_at: 1899992800, captured_at: "2030-03-17 10:00:00",
+  };
+  const refresh = test.app.fetchHomeStatus();
+  test.requests[0].resolve(snapshot({ arrivals: [unfamiliar, recognised] }));
+  await refresh;
+  const list = test.nodes["tablet-timeline-list"];
+  assert(list.children.length === 2, "Mixed arrivals must appear together as exactly two records");
+  const unknownRow = list.children[0];
+  const knownRow = list.children[1];
+  assert(unknownRow.innerHTML.includes("/previews/thumb.jpg"), "Unfamiliar arrivals must use a preview");
+  assert(!unknownRow.innerHTML.includes("/images/") && unknownRow.innerHTML.includes("&lt;img"), "Unfamiliar markup must escape plate text and avoid originals");
+  assert(unknownRow.innerHTML.includes("Unfamiliar") && unknownRow.innerHTML.includes("1m ago"), "Unfamiliar records need a label and age from the Pi clock");
+  assert(!knownRow.innerHTML.includes("Unfamiliar") && knownRow.innerHTML.includes("Someone &amp; Co"), "Matched records must retain escaped owner text without an unfamiliar label");
+  assert(knownRow.innerHTML.includes("2h ago") && knownRow.innerHTML.includes("dot-stale"), "Matched arrival text and dot must agree with the server clock");
+  [unknownRow, knownRow].forEach((row) => {
+    assert((row.innerHTML.match(/data-tablet-relative=/g) || []).length === 1, "Every arrival must display its relative age once across phone and wall layouts");
+    assert(!row.innerHTML.includes("Latest check") && !row.innerHTML.includes("No pulse"), "Arrival records must not repeat decision context");
+  });
+  assert(/title="[^"]*2030-03-17 10:00:00[^"]*"/.test(knownRow.innerHTML), "The exact capture timestamp must remain available without a second visible time");
+  assert(test.nodes["home-arrival-status"].hidden, "A current arrival response must not display a stale warning");
+  test.advance(1000);
+  const unchangedRefresh = test.app.fetchHomeStatus();
+  test.requests[1].resolve(snapshot({ arrivals: [unfamiliar, recognised] }));
+  await unchangedRefresh;
+  assert(list.children[0] === unknownRow && list.children[1] === knownRow,
+    "Unchanged arrival polls must not recreate or redownload the preview images");
+
+  const age = test.fields[2];
+  age.dataset.tabletSeenAt = String(unfamiliar.seen_at);
+  age.dataset.tabletRelative = unfamiliar.captured_at;
+  const dot = test.fields[0];
+  dot.dataset.tabletSeenAt = String(recognised.seen_at);
+  dot.dataset.tabletRelativeDot = recognised.captured_at;
+  dot.classList.add("dot-fresh");
+  list.querySelectorAll = (selector) => selector === "[data-tablet-relative]" ? [age]
+    : selector === "[data-tablet-relative-dot]" ? [dot] : [];
+  test.advance(360000);
+  const failedRefresh = test.app.fetchHomeStatus();
+  test.requests[2].reject(new Error("offline"));
+  await failedRefresh;
+  test.app.updateTabletTimelineRelativeTimes();
+  assert(test.app.state.tabletEvents.length === 2 && list.children[0] === unknownRow && list.children[1] === knownRow,
+    "Offline polling must preserve the last two records, including older unfamiliar sightings");
+  assert(unknownRow.innerHTML.includes("Unfamiliar") && age.textContent === "7m ago", "Retained unfamiliar records must keep their label and show their increasing age");
+  assert(!test.nodes["home-arrival-status"].hidden && test.nodes["home-arrival-status"].textContent.includes("last received"),
+    "Failed arrival updates must clearly label retained details");
+  assert(dot.classList.contains("dot-stale") && !dot.classList.contains("dot-fresh"), "Periodic dot updates must also ignore a wrong client clock");
+}
+
+function checkRecordedDecisions() {
+  const test = setup();
   const decision = { id: 2, plate: "TEST123", seen_at: 1899999999,
     detail: { decision: { version: 1, reason: "allowlist_match", match_type: "exact", relay_command: "pulse_sent" } } };
-  applySnapshot(test, snapshot({ unfamiliar: [event], recent_decisions: [decision] }));
-  test.app.renderHomeArrivals();
-  const card = test.nodes["home-unfamiliar"];
-  assert(!card.hidden && card.innerHTML.includes("/previews/thumb.jpg"), "Recent unfamiliar arrival must use a preview");
-  assert(!card.innerHTML.includes("/images/") && card.innerHTML.includes("&lt;img"), "Unfamiliar markup must escape plate text and avoid originals");
-  assert(test.nodes["home-unfamiliar-age"].textContent === "Seen 1m ago", "Arrival age must use Pi time despite a wrong browser clock");
-  const writes = card.writes;
-  test.advance(1000);
-  test.app.renderHomeArrivals();
-  assert(card.writes === writes, "Age updates must not rebuild or redownload the arrival preview");
-  assert(test.nodes["home-decision"].innerHTML.includes("Relay pulse sent"), "Decision card must use the recorded relay outcome");
-  assert(test.nodes["home-decision-age"].textContent === "just now", "Decision creation time must use the recorded decision age");
-  assert(!test.nodes["home-decision"].innerHTML.includes("Gate opened"), "A relay acknowledgement is not physical gate position");
-  test.app.state.homeStatusError = true;
-  test.advance(199000);
-  test.app.renderHomeArrivals();
-  assert(card.hidden && card.innerHTML === "", "Unfamiliar arrival must expire locally even while polling is offline");
-  assert(!test.nodes["home-arrival-status"].hidden, "Old arrival snapshots must be labelled when updates stop");
-  test.app.state.homeStatus.decisions_available = false;
-  test.app.renderHomeArrivals();
-  assert(test.nodes["home-decision"].innerHTML.includes("Decision history unavailable"), "Unavailable decisions must not be presented as an empty history");
+  assert(test.app.describeDecision(decision).includes("Relay pulse sent"), "Decision history must retain the recorded relay outcome");
+  assert(!test.app.describeDecision(decision).includes("Gate opened"), "A relay acknowledgement is not physical gate position");
   assert(test.app.describeDecision({ kind: "recognised", allowed: true }) === "", "Historical captures must not acquire invented decisions");
   const expected = { coalesced: "recent relay pulse", uncertain: "outcome uncertain", failed_before_activation: "No relay pulse sent", not_requested: "No relay pulse requested" };
   Object.keys(expected).forEach((command) => {
     decision.detail.decision.relay_command = command;
-    assert(test.app.describeDecision(decision).includes(expected[command]), "Each relay outcome must remain distinct");
+    assert(test.app.describeDecision(decision).includes(expected[command]), "Each relay outcome must remain distinct in decision history");
   });
-  test.app.state.tabletEvents = [{ id: 5, plate: "OLD123", seen_at: 1899992800, captured_at: "2030-03-17 10:00:00" }];
-  test.app.renderTabletTimeline();
-  const row = test.nodes["tablet-timeline-list"].children[0];
-  assert(row.innerHTML.includes("2h ago") && row.innerHTML.includes("dot-stale"), "Known arrival text and dot must agree with the server clock");
-  const dot = test.fields[2];
-  dot.dataset.tabletSeenAt = "1899992800";
-  dot.dataset.tabletRelativeDot = "2030-03-17 10:00:00";
-  dot.classList.add("dot-fresh");
-  test.nodes["tablet-timeline-list"].querySelectorAll = (selector) => selector === "[data-tablet-relative-dot]" ? [dot] : [];
-  test.app.updateTabletTimelineRelativeTimes();
-  assert(dot.classList.contains("dot-stale") && !dot.classList.contains("dot-fresh"), "Periodic dot updates must also ignore a wrong client clock");
+}
+
+function checkHomeMetrics() {
+  const test = setup();
+  const latest = { id: 1, kind: "unmatched", processing_time_ms: 184, confidence: 92.4 };
+  const earlier = { id: 2, kind: "recognised", processing_time_ms: 999, confidence: 12.3 };
+  const metrics = { temperature_c: 58.2, disk_free_pct: 73 };
+  const ids = ["home-cpu-temp", "home-processing", "home-confidence", "home-disk-free"];
+  const values = () => ids.map((id) => test.nodes[id].textContent);
+  function prepare(measurements, arrivals) {
+    applySnapshot(test, snapshot({ metrics: measurements, arrivals }));
+    test.app.state.tabletEvents = arrivals;
+  }
+  function assertValues(expected, message) {
+    assert(JSON.stringify(values()) === JSON.stringify(expected), message);
+  }
+  prepare(metrics, [latest, earlier]);
+  test.app.renderHomeStatus();
+  test.app.renderHomeArrivals();
+  assertValues(["58.2°C", "184 ms", "92.4%", "73%"],
+    "Home refresh must show current system measurements and the latest arrival's processing time and OCR confidence");
+
+  prepare(metrics, [{ id: 3 }, earlier]);
+  test.app.renderHomeMetrics();
+  assertValues(["58.2°C", "—", "—", "73%"],
+    "Missing latest-arrival measurements must not be replaced with the older matched record's measurements");
+  prepare(undefined, []);
+  test.app.renderHomeMetrics();
+  assertValues(["—", "—", "—", "—"], "Missing measurements must display as unavailable instead of zero");
+  [null, undefined, "0", "58.2", "", NaN, Infinity, -Infinity].forEach((invalid) => {
+    prepare({ temperature_c: invalid, disk_free_pct: invalid },
+      [{ ...latest, processing_time_ms: invalid, confidence: invalid }]);
+    test.app.renderHomeMetrics();
+    assertValues(["—", "—", "—", "—"], "Only finite numeric measurements may appear in Home metrics");
+  });
+  [-1, 101].forEach((invalidPercent) => {
+    prepare({ temperature_c: -3.5, disk_free_pct: invalidPercent },
+      [{ ...latest, processing_time_ms: -1, confidence: invalidPercent }]);
+    test.app.renderHomeMetrics();
+    assertValues(["-3.5°C", "—", "—", "—"],
+      "Finite temperatures are allowed while negative processing times and percentages outside 0–100 are unavailable");
+  });
+  prepare({ temperature_c: 0, disk_free_pct: 0 }, [{ ...latest, processing_time_ms: 0, confidence: 0 }]);
+  test.app.renderHomeMetrics();
+  assert(test.nodes["home-processing"].textContent === "0 ms", "A recorded zero processing time must remain valid");
+  ["home-cpu-temp", "home-confidence", "home-disk-free"].forEach((id) => {
+    assert(parseFloat(test.nodes[id].textContent) === 0, "Valid zero measurements must remain visible");
+  });
+  prepare({ ...metrics, disk_free_pct: 100 }, [{ ...latest, confidence: 100 }]);
+  test.app.renderHomeMetrics();
+  assert(parseFloat(test.nodes["home-confidence"].textContent) === 100 &&
+    parseFloat(test.nodes["home-disk-free"].textContent) === 100, "Percentage measurements must accept their upper boundary");
+
+  prepare(metrics, [latest, earlier]);
+  test.app.state.homeStatusError = true;
+  test.app.renderHomeMetrics();
+  assertValues(["—", "184 ms", "92.4%", "—"],
+    "Offline updates must stop claiming current system measurements while preserving historical capture measurements");
+  prepare(metrics, [latest, earlier]);
+  test.advance(21000);
+  test.app.renderHomeMetrics();
+  assertValues(["—", "184 ms", "92.4%", "—"],
+    "An expired status sample must hide current system measurements even without a network error");
 }
 
 async function checkHomePolling() {
@@ -357,9 +446,11 @@ async function checkHomePolling() {
   test.app.pollVisibleTab(test.app.fetchHomeStatus, 5000, "home");
   test.document.dispatch("visibilitychange");
   assert(test.requests.length === 1, "Home refresh must be single-flight");
-  test.requests[0].resolve(snapshot({ recognised: [{ id: 1 }, { id: 2 }, { id: 3 }] }));
+  test.requests[0].resolve(snapshot({ arrivals: [{ id: 1, kind: "unmatched" }, { id: 2, kind: "recognised" }, { id: 3, kind: "recognised" }] }));
   await settle();
-  assert(test.app.state.tabletEvents.length === 2, "Home must retain at most two recognised arrivals");
+  assert(test.app.state.tabletEvents.length === 2, "Home must retain at most two arrivals, including mixed kinds");
+  assert(test.app.state.tabletEvents[0].id === 1 && test.app.state.tabletEvents[1].id === 2,
+    "The home UI must retain the backend's latest-seen order without filtering unfamiliar records");
   test.app.setActiveTab("candidates");
   test.advance(6000);
   assert(test.requests.length === 1, "Hidden Home must not poll");
@@ -458,11 +549,13 @@ async function run() {
   checkFrameTruth();
   checkSampledSourceAge();
   checkDisplayDiagnostics();
-  checkArrivalExpiryAndDecisions();
+  await checkLatestSeenArrivals();
+  checkRecordedDecisions();
+  checkHomeMetrics();
   await checkHomePolling();
   await checkPlateFeedback();
   await checkPlateDeadlines();
-  report("Home frame/source truth, service freshness, arrival expiry, decisions, polling and plate feedback checks passed");
+  report("Home frame/source truth, service freshness, unified arrivals, decision history, metrics, polling and plate feedback checks passed");
 }
 run().catch((error) => {
   report(String(error));

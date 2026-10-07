@@ -6,12 +6,33 @@
   tags:
     - provision
 
-- name: Update apt cache
-  apt:
-    update_cache: yes
-    cache_valid_time: 3600
+- name: Refresh apt cache and upgrade OS packages
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 0
+    upgrade: safe
+    force_apt_get: true
+    fail_on_autoremove: true
+    lock_timeout: 300
   tags:
     - provision
+    - os_update
+
+- name: Check whether package updates request a reboot
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: gate_os_reboot_required
+  tags:
+    - provision
+    - os_update
+
+- name: Report requested reboot after package updates
+  ansible.builtin.debug:
+    msg: "Package updates require a reboot. Reboot the Pi during a suitable maintenance window, then check the gate services."
+  when: gate_os_reboot_required.stat.exists
+  tags:
+    - provision
+    - os_update
 
 - name: Install baseline runtime packages
   apt:

@@ -149,7 +149,7 @@ body.fullscreen-page .tablet-timeline-list {
 }
 
 body.fullscreen-page .tablet-timeline-row {
-  grid-template-columns: 52px 1fr auto;
+  grid-template-columns: 52px minmax(0, 1fr);
   gap: 6px;
 }
 
@@ -158,11 +158,6 @@ body.fullscreen-page .tablet-thumb-placeholder {
   width: 52px;
   height: 39px;
   border-radius: 8px;
-}
-
-body.fullscreen-page .tablet-time {
-  font-size: 0.78rem;
-  gap: 2px;
 }
 
 body.fullscreen-page .tablet-timeline-row.clickable {
@@ -545,6 +540,40 @@ body.theme-dark .log-ts {
   gap: 12px;
 }
 
+.home-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, max-content);
+  justify-content: space-between;
+  gap: 8px;
+  width: 82%;
+  justify-self: center;
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 4px 12px var(--shadow);
+}
+
+.home-metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  min-width: 0;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.home-metric-label {
+  margin-right: 6px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.home-metric strong {
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .tablet-stream {
   width: 70%;
   justify-self: center;
@@ -570,6 +599,7 @@ body.theme-dark .log-ts {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  object-position: center top;
 }
 
 .stream-head-right {
@@ -626,83 +656,8 @@ body.theme-dark .log-ts {
   overflow-wrap: break-word;
 }
 
-.home-decision {
-  position: relative;
-  border-top: 1px solid var(--border);
-  padding-top: 4px;
-  min-width: 0;
-}
-
-.home-decision summary {
-  position: relative;
-  display: block;
-  min-height: 36px;
-  padding-right: 16px;
-  cursor: pointer;
-  font-size: 0.78rem;
-  color: var(--muted);
-  list-style: none;
-}
-
-.home-decision .decision-summary {
-  /* Old Safari treats summary as a special block, ignoring display:flex.
-     An ordinary child preserves one compact row and the native disclosure. */
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  min-height: inherit;
-}
-
-.home-decision .decision-summary > * {
-  margin-right: 8px;
-}
-
-.home-decision summary::after {
-  content: "+";
-  position: absolute;
-  right: 0;
-  top: 7px;
-  font-size: 1.1rem;
-}
-
-.home-decision[open] summary::after {
-  content: "−";
-}
-
-.home-decision summary::-webkit-details-marker,
 .home-health-details summary::-webkit-details-marker {
   display: none;
-}
-
-.home-decision .decision-note {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  right: 0;
-  margin-bottom: 8px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel);
-  box-shadow: 0 8px 24px var(--shadow);
-  z-index: 3;
-}
-
-.decision-title,
-.unfamiliar-title {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--muted);
-}
-
-.home-decision .plate {
-  color: var(--ink);
-  font-weight: 600;
-  overflow-wrap: break-word;
-}
-
-.home-decision .live-badge {
-  font-size: 0.7rem;
 }
 
 .home-health {
@@ -716,8 +671,7 @@ body.theme-dark .log-ts {
   margin: 3px;
 }
 
-.home-health .live-badge,
-.home-decision .live-badge {
+.home-health .live-badge {
   text-transform: none;
   letter-spacing: 0;
   white-space: nowrap;
@@ -771,45 +725,12 @@ body.theme-dark .log-ts {
   z-index: 3;
 }
 
-.home-health-details summary:focus-visible,
-.home-decision summary:focus-visible {
+.home-health-details summary:focus-visible {
   outline: 2px solid var(--accent-strong);
   outline-offset: 4px;
 }
 
 .live-badge[hidden] {
-  display: none;
-}
-
-.tablet-mobile-age {
-  display: none;
-}
-
-.home-unfamiliar {
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-  display: flex;
-  align-items: center;
-}
-
-.home-unfamiliar .plate {
-  font-size: 0.9rem;
-}
-
-.home-unfamiliar .meta {
-  font-size: 0.78rem;
-}
-
-.home-unfamiliar img {
-  width: 72px;
-  height: 54px;
-  object-fit: cover;
-  border-radius: 8px;
-  margin-right: 12px;
-}
-
-.home-unfamiliar[hidden],
-.home-decision[hidden] {
   display: none;
 }
 
@@ -822,15 +743,8 @@ body.theme-dark .allowlist-status.is-error {
   color: #f3bc7b;
 }
 
-body.fullscreen-page .home-system-status,
-body.fullscreen-page .home-decision .decision-note {
+body.fullscreen-page .home-system-status {
   font-size: 0.72rem;
-}
-
-body.fullscreen-page .home-unfamiliar img {
-  width: 52px;
-  height: 39px;
-  margin-right: 6px;
 }
 
 @media (max-width: 720px) {
@@ -841,10 +755,6 @@ body.fullscreen-page .home-unfamiliar img {
 
   body .tablet-timeline-row {
     grid-template-columns: 72px minmax(0, 1fr);
-  }
-
-  body .tablet-time {
-    display: none;
   }
 }
 
@@ -957,7 +867,7 @@ body.fullscreen-page .home-unfamiliar img {
 
 .tablet-timeline-row {
   display: grid;
-  grid-template-columns: 72px 1fr auto;
+  grid-template-columns: 72px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
 }
@@ -974,22 +884,32 @@ body.fullscreen-page .home-unfamiliar img {
   font-weight: 700;
 }
 
-.tablet-time {
-  display: grid;
-  gap: 6px;
-  justify-items: end;
-  font-weight: 600;
-  color: var(--muted);
-  font-size: 0.9rem;
+.tablet-info .meta {
+  display: flex;
+  align-items: center;
 }
 
-.tablet-time .dot {
-  width: 9px;
-  height: 9px;
+.tablet-info .arrival-kind {
+  color: #b05228;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+body.theme-dark .tablet-info .arrival-kind {
+  color: #f3bc7b;
+}
+
+.tablet-info .meta .dot {
+  margin-right: 6px;
+  flex-shrink: 0;
 }
 
 .dot-fresh {
   background: #2f9a5b;
+}
+
+.tablet-timeline-row.unmatched .dot {
+  background: #c27816;
 }
 
 .dot-stale {
@@ -1985,19 +1905,37 @@ textarea {
   body.main-page.home-active .tablet-grid {
     height: 100%;
     min-height: 0;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto minmax(0, 1fr);
   }
 
   body:not(.fullscreen-page) .tablet-stream {
     min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    width: var(--home-stream-card-width, 100%);
+    padding: 10px;
+    gap: 8px;
   }
 
   body:not(.fullscreen-page) .tablet-stream-frame {
-    height: 100%;
+    width: var(--home-stream-width, 100%);
+    height: var(--home-stream-height, auto);
     min-height: 0;
     padding-top: 0;
     aspect-ratio: auto;
+  }
+
+  body:not(.fullscreen-page) .tablet-gate {
+    grid-row: 1 / 4;
+  }
+
+  body:not(.fullscreen-page) .tablet-timeline {
+    grid-row: 2;
+  }
+
+  body:not(.fullscreen-page) .home-metrics {
+    width: 100%;
+    grid-column: 1;
+    grid-row: 3;
   }
 
   body:not(.fullscreen-page) .tablet-gate .gate-button {
@@ -2013,15 +1951,23 @@ textarea {
   }
 
   body:not(.fullscreen-page) .tablet-timeline-row {
-    grid-template-columns: 52px minmax(0, 1fr) auto;
+    grid-template-columns: 52px minmax(0, 1fr);
     gap: 8px;
   }
 
   body:not(.fullscreen-page) .tablet-thumb img,
-  body:not(.fullscreen-page) .tablet-thumb-placeholder,
-  body:not(.fullscreen-page) .home-unfamiliar img {
+  body:not(.fullscreen-page) .tablet-thumb-placeholder {
     width: 52px;
     height: 39px;
+  }
+}
+
+/* Two compact records use landscape width to give the camera more height.
+   Phones keep the same reading order in one column. */
+@media (min-width: 900px) {
+  body:not(.fullscreen-page) .tablet-timeline-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 16px;
   }
 }
 
@@ -2047,24 +1993,45 @@ textarea {
   body.fullscreen-page .tablet-grid {
     height: 100%;
     min-height: 0;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto minmax(0, 1fr);
   }
 
   body.fullscreen-page .tablet-stream {
     min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    width: var(--home-stream-card-width, 100%);
   }
 
   body.fullscreen-page .tablet-stream-frame {
-    height: 100%;
+    width: var(--home-stream-width, 100%);
+    height: var(--home-stream-height, auto);
     min-height: 0;
     padding-top: 0;
     aspect-ratio: auto;
   }
 
+  body.fullscreen-page .tablet-timeline-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px;
+  }
+
   body.fullscreen-page .home-health .live-badge {
     padding: 3px 6px;
     font-size: 0.66rem;
+  }
+
+  body.fullscreen-page .tablet-gate {
+    grid-row: 1 / 4;
+  }
+
+  body.fullscreen-page .tablet-timeline {
+    grid-row: 2;
+  }
+
+  body.fullscreen-page .home-metrics {
+    width: 100%;
+    grid-column: 1;
+    grid-row: 3;
   }
 
   body.fullscreen-page .tablet-gate .gate-button {
@@ -2085,23 +2052,13 @@ textarea {
   }
 
   body.fullscreen-page .tablet-timeline-row {
-    grid-template-columns: 44px minmax(0, 1fr) auto;
+    grid-template-columns: 44px minmax(0, 1fr);
   }
 
   body.fullscreen-page .tablet-thumb img,
-  body.fullscreen-page .tablet-thumb-placeholder,
-  body.fullscreen-page .home-unfamiliar img {
+  body.fullscreen-page .tablet-thumb-placeholder {
     width: 44px;
     height: 33px;
-  }
-
-  body.fullscreen-page .tablet-timeline .legend {
-    display: none;
-  }
-
-  body.fullscreen-page .home-decision summary {
-    min-height: 32px;
-    font-size: 0.7rem;
   }
 }
 
@@ -2187,6 +2144,18 @@ textarea {
     gap: 10px;
   }
 
+  body.main-page .home-metrics {
+    grid-column: 1;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+    padding: 10px 12px;
+  }
+
+  body.main-page .home-metric-label {
+    white-space: normal;
+  }
+
   body.main-page .tablet-grid > .card {
     width: 100%;
     grid-column: 1;
@@ -2269,18 +2238,13 @@ textarea {
     font-size: 0.78rem;
   }
 
-  body.main-page .tablet-timeline .legend {
-    font-size: 0.72rem;
-  }
-
   body.main-page .tablet-timeline-row {
     grid-template-columns: 52px minmax(0, 1fr);
     gap: 10px;
   }
 
   body.main-page .tablet-thumb img,
-  body.main-page .tablet-thumb-placeholder,
-  body.main-page .home-unfamiliar img {
+  body.main-page .tablet-thumb-placeholder {
     width: 52px;
     height: 39px;
     border-radius: 8px;
@@ -2292,14 +2256,5 @@ textarea {
 
   body.main-page .tablet-info .meta {
     font-size: 0.76rem;
-  }
-
-  .tablet-mobile-age {
-    display: inline;
-  }
-
-  body.main-page .home-decision summary {
-    min-height: 44px;
-    row-gap: 5px;
   }
 }

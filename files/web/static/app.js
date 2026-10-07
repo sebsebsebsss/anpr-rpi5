@@ -41,8 +41,6 @@ const state = {
   homeFrame: null,
   homeStreamError: "",
   homeSourceIsLocal: false,
-  unfamiliarRenderedId: null,
-  decisionRenderedKey: "",
   logsLastFetch: 0,
   logsLoading: false,
   logsLines: [],
@@ -1155,6 +1153,7 @@ function setActiveTab(target, { updateHash = true } = {}) {
     renderHomeStatus();
     renderHomeArrivals();
     if (state.homeStatus) renderTabletTimeline();
+    fitHomeStream();
   }
   visibleTabPollers.forEach((poll) => poll());
   if (target === "candidates" && !state.eventsLoaded && !state.loadingCandidateEvents) {
@@ -1620,6 +1619,42 @@ async function initCooldownStatus() {
   }
 }
 
+function fitHomeStream() {
+  if (!isTabActive("home")) return;
+  const kiosk = document.body.classList.contains("fullscreen-page");
+  if (window.innerWidth < (kiosk ? 721 : 900)) return;
+  const grid = document.querySelector(".tablet-grid");
+  const stream = document.querySelector(".tablet-stream");
+  const timeline = document.querySelector(".tablet-timeline");
+  const metrics = document.querySelector(".home-metrics");
+  const frame = document.getElementById("tablet-stream-frame");
+  if (!grid || !stream || !timeline || !frame) return;
+  const head = stream.querySelector(".card-head");
+  const image = frame.querySelector("img");
+  const loaded = state.homeFrame;
+  const ratio = image && image.naturalWidth && image.naturalHeight
+    ? image.naturalWidth / image.naturalHeight
+    : loaded && loaded.width && loaded.height ? loaded.width / loaded.height : 16 / 9;
+  const spacing = getComputedStyle(stream);
+  const paddingX = parseFloat(spacing.paddingLeft) + parseFloat(spacing.paddingRight);
+  const paddingY = parseFloat(spacing.paddingTop) + parseFloat(spacing.paddingBottom);
+  const gridGap = parseFloat(getComputedStyle(grid).rowGap) || 0;
+  const cardGap = parseFloat(spacing.rowGap) || 0;
+  const availableWidth = timeline.getBoundingClientRect().width - paddingX;
+  // The camera, sightings and metrics sit together at the top. The gate spans
+  // those three rows; any surplus height stays outside the content cards.
+  // A second pass accounts for a header wrapping on a very short display.
+  for (let pass = 0; pass < 2; pass++) {
+    const metricsHeight = metrics ? metrics.getBoundingClientRect().height : 0;
+    const availableHeight = grid.clientHeight - timeline.getBoundingClientRect().height - metricsHeight - 3 * gridGap
+      - paddingY - head.getBoundingClientRect().height - cardGap;
+    const width = Math.max(1, Math.min(availableWidth, availableHeight * ratio));
+    frame.style.setProperty("--home-stream-width", `${width}px`);
+    frame.style.setProperty("--home-stream-height", `${width / ratio}px`);
+    stream.style.setProperty("--home-stream-card-width", `${width + paddingX}px`);
+  }
+}
+
 function initHomeViewport() {
   // iOS 12's 100vh includes space behind Safari's address bar. Use the actual
   // visible height for the fixed wall layouts, leaving other tabs and phones
@@ -1632,6 +1667,7 @@ function initHomeViewport() {
     }
     if (Number.isFinite(height) && height > 0) {
       document.documentElement.style.setProperty("--home-viewport-height", `${Math.floor(height)}px`);
+      fitHomeStream();
     }
   };
   update();
@@ -1735,9 +1771,18 @@ async function initTabletStream() {
     const stack = LEGACY_IOS ? createLegacyStreamImage(url) : createSmoothImageStream(url);
     frame.innerHTML = "";
     frame.appendChild(stack);
+    let loadedRatio = null;
+    stack.addEventListener("load", () => {
+      const ratio = stack.naturalWidth / stack.naturalHeight;
+      if (Number.isFinite(ratio) && ratio > 0 && ratio !== loadedRatio) {
+        loadedRatio = ratio;
+        fitHomeStream();
+      }
+    });
     state.homeFrame = stack.gateFrameState;
     state.homeStreamError = "";
     renderHomeStatus();
+    fitHomeStream();
   } catch (err) {
     state.homeStreamError = "Stream unavailable";
     renderHomeStatus();
@@ -1891,9 +1936,9 @@ async function fetchHomeStatus() {
     state.homeStatus = data;
     state.homeStatusReceivedAt = Date.now();
     state.homeStatusError = false;
-    const recognised = Array.isArray(data.recognised) ? data.recognised.slice(0, 2) : [];
-    if (firstSnapshot || JSON.stringify(state.tabletEvents) !== JSON.stringify(recognised)) {
-      state.tabletEvents = recognised;
+    const arrivals = Array.isArray(data.arrivals) ? data.arrivals.slice(0, 2) : [];
+    if (firstSnapshot || JSON.stringify(state.tabletEvents) !== JSON.stringify(arrivals)) {
+      state.tabletEvents = arrivals;
       if (!document.hidden && isTabActive("home")) renderTabletTimeline();
     }
     updateTabletTimelineRelativeTimes();
@@ -1908,73 +1953,39 @@ async function fetchHomeStatus() {
 
 function renderHomeArrivals() {
   if (document.hidden || !isTabActive("home")) return;
-  const snapshot = state.homeStatus;
-  const now = homeServerNow();
-  const unknown = document.getElementById("home-unfamiliar");
-  if (unknown) {
-    const entries = snapshot && Array.isArray(snapshot.unfamiliar) ? snapshot.unfamiliar : [];
-    const event = entries.find((entry) => Number.isFinite(entry.seen_at) && Number.isFinite(entry.expires_at) &&
-      now !== null && now < Math.min(entry.expires_at, entry.seen_at + 300));
-    unknown.hidden = !event;
-    if (!event) {
-      unknown.innerHTML = "";
-      state.unfamiliarRenderedId = null;
-    } else {
-      const key = JSON.stringify([event.id, event.seen_at, event.plate, event.thumbnail_url, event.preview_url]);
-      if (state.unfamiliarRenderedId !== key) {
-        const preview = historyPreview(event, true);
-        const plate = event.plate && event.plate !== "UNKNOWN" ? event.plate : "Plate unreadable";
-        unknown.innerHTML = `
-          ${preview ? `<img src="${escapeHtml(preview)}" alt="Recent unfamiliar vehicle capture" />` : ""}
-          <div><div class="unfamiliar-title">Unfamiliar vehicle seen</div>
-            <div class="plate">${escapeHtml(plate)}</div><div id="home-unfamiliar-age" class="meta"></div>
-          </div>`;
-        state.unfamiliarRenderedId = key;
-      }
-      const age = document.getElementById("home-unfamiliar-age");
-      if (age) age.textContent = `Seen ${formatRelativeDelta(homeSeenAge(event.seen_at))}`;
-    }
-  }
-  const card = document.getElementById("home-decision");
-  if (card) {
-    const decisions = snapshot && Array.isArray(snapshot.recent_decisions) ? snapshot.recent_decisions : [];
-    const event = decisions.find((item) => describeDecision(item));
-    card.hidden = !event;
-    if (snapshot && snapshot.decisions_available === false) {
-      card.hidden = false;
-      card.innerHTML = '<summary class="decision-unavailable">Decision history unavailable</summary>';
-      state.decisionRenderedKey = "";
-    } else if (!event) {
-      card.innerHTML = "";
-      state.decisionRenderedKey = "";
-    } else {
-      const key = JSON.stringify([event.id, event.plate, event.detail]);
-      if (key !== state.decisionRenderedKey) {
-        const command = event.detail.decision.relay_command;
-        const outcomes = {
-          pulse_sent: "Pulse sent", coalesced: "Already pulsed", not_requested: "No pulse requested",
-          failed_before_activation: "Pulse failed", uncertain: "Pulse uncertain",
-        };
-        const outcome = outcomes[command] || "Recorded decision";
-        const tone = command === "uncertain" || command === "failed_before_activation" ? "bad" : "neutral";
-        card.innerHTML = `<summary><span class="decision-summary"><span class="decision-title">Latest check</span>
-          <span class="plate">${escapeHtml(event.plate || event.observed_plate || "Plate unreadable")}</span>
-          <span class="live-badge status-${tone}">${escapeHtml(outcome)}</span>
-          <span id="home-decision-age" class="meta"></span></span></summary>
-          <div class="decision-note">${escapeHtml(describeDecision(event))}</div>`;
-        state.decisionRenderedKey = key;
-      }
-      const age = document.getElementById("home-decision-age");
-      const elapsed = homeSeenAge(event.seen_at);
-      if (age) age.textContent = elapsed === null ? "" : formatRelativeDelta(elapsed);
-    }
-  }
+  renderHomeMetrics();
   const status = document.getElementById("home-arrival-status");
   if (status) {
+    const wasHidden = status.hidden;
     status.hidden = homeStatusIsCurrent();
-    status.textContent = snapshot ? "Arrival updates unavailable; showing last received details." :
-      state.homeStatusError ? "Arrival updates unavailable." : "Loading recent arrivals…";
+    status.textContent = state.homeStatus ? "Home updates unavailable; showing last received sightings." :
+      state.homeStatusError ? "Home updates unavailable." : "Loading recent arrivals…";
+    if (wasHidden !== status.hidden) fitHomeStream();
   }
+}
+
+function renderHomeMetrics() {
+  const snapshot = state.homeStatus;
+  const metrics = snapshot && snapshot.metrics || {};
+  const latest = snapshot && Array.isArray(snapshot.arrivals) && snapshot.arrivals[0] || {};
+  const current = homeStatusIsCurrent();
+  const percent = value => Number.isFinite(value) && value >= 0 && value <= 100;
+  const readings = [
+    ["home-cpu-temp", current && Number.isFinite(metrics.temperature_c)
+      ? `${metrics.temperature_c.toFixed(1)}°C` : "—", "Current Pi CPU temperature"],
+    ["home-processing", Number.isFinite(latest.processing_time_ms) && latest.processing_time_ms >= 0
+      ? formatProcessingTime(latest.processing_time_ms).replace(/(ms|s)$/, " $1") : "—", "Recognition processing time for the latest sighting"],
+    ["home-confidence", percent(latest.confidence)
+      ? `${latest.confidence.toFixed(1)}%` : "—", "OCR confidence for the latest sighting"],
+    ["home-disk-free", current && percent(metrics.disk_free_pct)
+      ? `${metrics.disk_free_pct.toFixed(0)}%` : "—", "Free space on the Pi system disk"],
+  ];
+  readings.forEach(([id, value, description]) => {
+    const node = document.getElementById(id);
+    if (!node) return;
+    if (node.textContent !== value) node.textContent = value;
+    node.title = value === "—" ? `${description}: unavailable` : description;
+  });
 }
 
 function renderTabletTimeline() {
@@ -1984,6 +1995,7 @@ function renderTabletTimeline() {
   state.tabletEvents.forEach((event) => {
     const row = document.createElement("div");
     row.className = "tablet-timeline-row";
+    if (event.kind === "unmatched") row.classList.add("unmatched");
     const thumb = event.image_url
       ? `<img src="${escapeHtml(historyPreview(event, true))}" alt="capture" loading="lazy" decoding="async" fetchpriority="low" />`
       : `<div class="tablet-thumb-placeholder"></div>`;
@@ -1992,16 +2004,18 @@ function renderTabletTimeline() {
     const dotClass = ageMinutes !== null && ageMinutes < 60 ? "dot-fresh" : "dot-stale";
     const rel = seenAge === null ? formatRelative(event.captured_at) : formatRelativeDelta(seenAge);
     const timestamp = escapeHtml(event.captured_at || "");
+    const plate = event.plate && event.plate !== "UNKNOWN" ? event.plate : "Plate unreadable";
+    const label = `${plate}${event.owner ? ` - ${event.owner}` : ""}`;
     const seenAttr = Number.isFinite(event.seen_at) ? `data-tablet-seen-at="${event.seen_at}"` : "";
     row.innerHTML = `
       <div class="tablet-thumb">${thumb}</div>
       <div class="tablet-info">
-        <div class="plate">${escapeHtml(event.plate || "UNKNOWN")}${event.owner ? ` - ${escapeHtml(event.owner)}` : ""}</div>
-        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))}<span class="tablet-mobile-age"> · <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span></span></div>
-      </div>
-      <div class="tablet-time">
-        <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}" ${seenAttr}></span>
-        <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span>
+        <div class="plate" title="${escapeHtml(label)}">${escapeHtml(label)}</div>
+        <div class="meta" title="${timestamp}">
+          <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}" ${seenAttr} aria-hidden="true"></span>
+          ${event.kind === "unmatched" ? '<span class="arrival-kind">Unfamiliar</span>' : ""}
+          <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span>
+        </div>
       </div>
     `;
     if (!document.body.classList.contains("fullscreen-page")) {
@@ -2017,9 +2031,10 @@ function renderTabletTimeline() {
   if (!state.tabletEvents.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No recognised plates yet.";
+    empty.textContent = "No vehicles seen yet.";
     list.appendChild(empty);
   }
+  fitHomeStream();
 }
 
 function updateTabletTimelineRelativeTimes() {

@@ -137,7 +137,8 @@ def main():
             counters["unexpected_requests"] += 1
             route.abort()
             return
-        local = STATIC / ("index.html" if path == "/" else path.removeprefix("/static/").lstrip("/"))
+        filename = {"/": "index.html", "/fullscreen": "fullscreen.html"}.get(path)
+        local = STATIC / (filename or path.removeprefix("/static/").lstrip("/"))
         if local.is_file() and local.resolve().is_relative_to(STATIC.resolve()):
             content = local.read_bytes().replace(b"__GATE_API_SHARED_SECRET__", b"synthetic-test-secret")
             route.fulfill(body=content, content_type=mimetypes.guess_type(local.name)[0] or "application/octet-stream")
@@ -185,59 +186,63 @@ def main():
                 args.output_dir.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(args.output_dir / name), full_page=True)
 
-        page.goto("http://gate.test/#stats", wait_until="domcontentloaded")
-        loaded("24h")
-        before = len(requests)
-        page.locator("#stats-chart .stats-bar:not(.stats-bar-empty)").first.click()
-        require(
-            page.locator("#stats-chart-reading").inner_text() == "29 Sep, 09:00 · 4 recorded events",
-            "chart labels changed with client clock or timezone",
-        )
-        require(len(requests) == before, "reading a bar unexpectedly fetched activity")
-        page.locator("#stats-chart .stats-bar:not(.stats-bar-empty)").first.focus()
-        page.keyboard.press("Enter")
-        require(len(requests) == before, "keyboard bar selection unexpectedly fetched activity")
-        page.set_viewport_size({"width": 390, "height": 844})
-        require(len(requests) == before, "resizing unexpectedly fetched activity")
-        loaded("24h")
-        fixture["health_error"] = True
-        select("7d")
-        page.wait_for_function("document.getElementById('stats-health-summary').textContent === 'Status unavailable'")
-        require(page.locator("#stat-recognised").inner_text() != "—", "health failure hid valid activity")
-        fixture["activity_error"] = True
-        page.locator('#tab-stats .chip[data-window="30d"]').click()
-        page.locator("#stats-error").wait_for(state="visible")
-        require(page.locator("#stat-recognised").inner_text() == "—", "failed period retained old totals")
-        require(page.locator("#stats-chart .stats-bar").count() == 0, "failed period retained old bars")
-        fixture.update(activity_error=False, health_error=False)
-        select("30d")
-        select("all")
-        select("7d")
-        for width, height, name in (
-            (1366, 900, "desktop"),
-            (1024, 748, "ipad"),
-            (390, 844, "phone"),
-            (320, 568, "small-phone"),
-        ):
-            page.set_viewport_size({"width": width, "height": height})
-            page.reload(wait_until="domcontentloaded")
+        for path in ("/", "/fullscreen"):
+            variant = "fullscreen-" if path == "/fullscreen" else ""
+            page.goto("http://gate.test" + path + "#stats", wait_until="domcontentloaded")
             loaded("24h")
-            select("7d")
-            page.evaluate("document.fonts.ready")
             before = len(requests)
-            for theme in ("light", "dark"):
-                page.evaluate("theme => document.body.classList.toggle('theme-dark', theme === 'dark')", theme)
-                page.evaluate(
-                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
-                )
-                screenshot("stats-" + name + "-" + theme + ".png")
-            require(len(requests) == before, "layout/theme change fetched activity")
+            page.locator("#stats-chart .stats-bar:not(.stats-bar-empty)").first.click()
+            require(
+                page.locator("#stats-chart-reading").inner_text() == "29 Sep, 09:00 · 4 recorded events",
+                "chart labels changed with client clock or timezone",
+            )
+            require(len(requests) == before, "reading a bar unexpectedly fetched activity")
+            page.locator("#stats-chart .stats-bar:not(.stats-bar-empty)").first.focus()
+            page.keyboard.press("Enter")
+            require(len(requests) == before, "keyboard bar selection unexpectedly fetched activity")
+            page.set_viewport_size({"width": 390, "height": 844})
+            require(len(requests) == before, "resizing unexpectedly fetched activity")
+            loaded("24h")
+            fixture["health_error"] = True
+            select("7d")
+            page.wait_for_function(
+                "document.getElementById('stats-health-summary').textContent === 'Status unavailable'"
+            )
+            require(page.locator("#stat-recognised").inner_text() != "—", "health failure hid valid activity")
+            fixture["activity_error"] = True
+            page.locator('#tab-stats .chip[data-window="30d"]').click()
+            page.locator("#stats-error").wait_for(state="visible")
+            require(page.locator("#stat-recognised").inner_text() == "—", "failed period retained old totals")
+            require(page.locator("#stats-chart .stats-bar").count() == 0, "failed period retained old bars")
+            fixture.update(activity_error=False, health_error=False)
+            select("30d")
+            select("all")
+            select("7d")
+            for width, height, name in (
+                (1366, 900, "desktop"),
+                (1024, 748, "ipad"),
+                (390, 844, "phone"),
+                (320, 568, "small-phone"),
+            ):
+                page.set_viewport_size({"width": width, "height": height})
+                page.reload(wait_until="domcontentloaded")
+                loaded("24h")
+                select("7d")
+                page.evaluate("document.fonts.ready")
+                before = len(requests)
+                for theme in ("light", "dark"):
+                    page.evaluate("theme => document.body.classList.toggle('theme-dark', theme === 'dark')", theme)
+                    page.evaluate(
+                        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+                    )
+                    screenshot("stats-" + variant + name + "-" + theme + ".png")
+                require(len(requests) == before, "layout/theme change fetched activity")
         browser.close()
     require(
         counters == {"blocked_writes": 0, "unexpected_requests": 0, "page_errors": 0},
         "unexpected request or browser error",
     )
-    print(json.dumps({"ok": True, "viewport_sizes": 4, "themes": 2, **counters}))
+    print(json.dumps({"ok": True, "pages": 2, "viewport_sizes": 4, "themes": 2, **counters}))
 
 
 if __name__ == "__main__":

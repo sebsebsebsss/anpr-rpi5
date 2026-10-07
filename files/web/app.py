@@ -53,7 +53,6 @@ STREAM_STALE_SECONDS = env_int("GATE_WEB_STREAM_STALE_SECONDS", 15, "gate_anpr_w
 PREVIEW_LOCK = threading.Lock()
 HOME_SERVICE_LOCK = threading.Lock()
 HOME_SERVICE_CACHE = {"checked_monotonic": None, "checked_at": None, "services": {}}
-UNFAMILIAR_MAX_AGE_SECONDS = 300
 GATE_PIN_BOARD = env_int("GATE_PIN_BOARD", 23, "gate_anpr_web")
 GATE_PIN_BCM = env_int("GATE_PIN_BCM", 11, "gate_anpr_web")
 EVENTS_DB_PATH = os.getenv("GATE_ANPR_EVENTS_DB", "/opt/gate_anpr/events.db")
@@ -1562,6 +1561,23 @@ def _home_service_snapshot():
     return dict(HOME_SERVICE_CACHE["services"]), HOME_SERVICE_CACHE["checked_at"]
 
 
+def _home_metrics_snapshot():
+    metrics = {"temperature_c": None, "disk_free_pct": None}
+    try:
+        temperature = _read_cpu_temperature_c()
+        if isinstance(temperature, (int, float)) and not isinstance(temperature, bool) and math.isfinite(temperature):
+            metrics["temperature_c"] = temperature
+    except (OSError, TypeError, ValueError):
+        pass
+    try:
+        disk_total, _, disk_free = shutil.disk_usage("/")
+        if disk_total > 0 and math.isfinite(disk_total) and math.isfinite(disk_free) and 0 <= disk_free <= disk_total:
+            metrics["disk_free_pct"] = round((disk_free / disk_total) * 100, 1)
+    except (OSError, TypeError, ValueError, OverflowError):
+        pass
+    return metrics
+
+
 def _timestamp_epoch(value):
     parsed = parse_local_timestamp(value)
     return parsed.timestamp() if parsed else None
@@ -1603,27 +1619,20 @@ def home_status():
     until = datetime.fromtimestamp(now)
     try:
         recognised = _query_events(kinds=["recognised"], limit=2, until=until)
-        unfamiliar = _query_events(
-            kinds=["unmatched"],
-            limit=1,
-            since=until - timedelta(seconds=UNFAMILIAR_MAX_AGE_SECONDS),
-            until=until,
-        )
+        unmatched = _query_events(kinds=["unmatched"], limit=2, until=until)
     except sqlite3.Error:
         return jsonify({"error": "Arrival information is temporarily unavailable"}), 503
-    for event in recognised + unfamiliar:
+    latest = max(recognised + unmatched, key=lambda event: (event["captured_at"], event["id"]), default=None)
+    if latest is None or latest["kind"] == "recognised":
+        arrivals = recognised
+    elif recognised:
+        arrivals = [unmatched[0], recognised[0]]
+    else:
+        arrivals = unmatched
+    for event in arrivals:
         event["seen_at"] = _timestamp_epoch(event["captured_at"])
-    unfamiliar = [event for event in unfamiliar if event["seen_at"] is not None]
-    for event in unfamiliar:
-        event["expires_at"] = event["seen_at"] + UNFAMILIAR_MAX_AGE_SECONDS
-    try:
-        recent_decisions = _recent_decision_payloads(3)
-        decisions_available = True
-    except sqlite3.Error:
-        # An older worker/schema during deployment need not hide camera status.
-        recent_decisions = []
-        decisions_available = False
     services, checked_at = _home_service_snapshot()
+    metrics = _home_metrics_snapshot()
     now, _, stream_age = _stream_frame_status()
     return jsonify(
         {
@@ -1635,11 +1644,8 @@ def home_status():
             },
             "services": services,
             "services_checked_at": checked_at,
-            "recognised": recognised,
-            "unfamiliar": unfamiliar,
-            "recent_decisions": recent_decisions,
-            "decisions_available": decisions_available,
-            "decision_sampling": _decision_sampling(),
+            "arrivals": arrivals,
+            "metrics": metrics,
         }
     )
 

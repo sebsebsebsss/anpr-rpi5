@@ -44,7 +44,7 @@ a{color:#bdedaa}article>a:first-of-type{display:inline-block;padding:10px 15px;b
 .secondary{margin-left:12px;font-size:13px}.note{font-size:13px}@media(max-width:620px){main{margin:25px auto;padding:22px}section{grid-template-columns:1fr}h1{font-size:30px}}
 </style></head><body><main><small>LOCAL DESIGN PREVIEW</small><h1>The wall screens come first.</h1>
 <p>The tightened existing interface preserves the large gate button and single-screen layouts. Resize your browser to check the dedicated displays and the separate phone layout.</p>
-<section><article><h2>iPad homepage</h2><p>Camera, large gate control and recent sightings together, with status pills and expandable details.</p><a href="/current">Open Home</a><a class="secondary" href="/current#stats">Open Stats</a></article>
+<section><article><h2>iPad homepage</h2><p>Camera, large gate control and two Latest seen captures together, with status pills and expandable details.</p><a href="/current">Open Home</a><a class="secondary" href="/current#stats">Open Stats</a></article>
 <article><h2>Pi touchscreen</h2><p>The fullscreen page uses the available screen area and keeps the gate control easy to tap.</p><a href="/fullscreen">Open fullscreen</a></article></section>
 <p class="note">All data and camera illustrations are synthetic. There is no live connection. Gate buttons cannot operate hardware, and all writes are blocked. Plain HTTP is sufficient.</p>
 <p class="note">Stop the preview with Ctrl+C in the terminal.</p></main></body></html>"""
@@ -82,8 +82,8 @@ def event(event_id, plate, kind, age):
         "plate": plate,
         "owner": "Example household" if recognised else "",
         "kind": kind,
-        "confidence": 92.4 if recognised else 81.2,
-        "processing_ms": 184,
+        "confidence": 92.4 if age == 120 else 88.0,
+        "processing_time_ms": 184 if age == 120 else 250,
         "seen_at": captured,
         "expires_at": captured + 300,
         "captured_at": pi_time(captured),
@@ -147,17 +147,13 @@ def api_fixture(path, query):
     events = sample_events()
     recognised = [item for item in events if item["kind"] == "recognised"]
     if path == "/api/home-status":
-        unfamiliar = [item for item in events if item["kind"] == "unmatched" and item["expires_at"] > now]
         return {
             "server_time": now,
             "services_checked_at": now,
             "stream": {"age_seconds": 1, "fresh": True, "stale_after_seconds": 15},
             "services": SERVICES,
-            "recognised": recognised,
-            "unfamiliar": unfamiliar,
-            "recent_decisions": events[:1],
-            "decisions_available": True,
-            "decision_sampling": {"per_reason_plate_seconds": 30, "global_seconds": 1, "retained_limit": 200},
+            "arrivals": events[:2],
+            "metrics": {"temperature_c": 58.2, "disk_free_pct": 73},
         }
     if path == "/api/stats":
         return stats_fixture(query.get("window", ["24h"])[0])

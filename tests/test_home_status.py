@@ -35,6 +35,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(app.time, "time", lambda: NOW)
     monkeypatch.setattr("gate_runtime.now_local_str", lambda: stamp(NOW))
     monkeypatch.setattr(app, "HOME_SERVICE_CACHE", {"checked_monotonic": None, "checked_at": None, "services": {}})
+    monkeypatch.setattr(app, "_read_cpu_temperature_c", lambda: 48.6)
+    monkeypatch.setattr(app.shutil, "disk_usage", lambda path: (1000, 875, 125))
     checks = []
 
     def service():
@@ -50,7 +52,7 @@ def home(tmp_path, monkeypatch):
         yield client, db, frame, checks
 
 
-def test_snapshot_bounds_arrivals_and_preserves_decision_evidence(home):
+def test_snapshot_bounds_arrivals_and_preserves_capture_evidence(home):
     client, db, _, _ = home
     for index in range(20):
         insert_event(
@@ -75,19 +77,174 @@ def test_snapshot_bounds_arrivals_and_preserves_decision_evidence(home):
     data = response.get_json()
     assert response.status_code == 200
     assert "no-store" in response.headers["Cache-Control"]
-    assert [event["id"] for event in data["recognised"]] == [20, 19]
-    assert data["recognised"][0]["plate"] == "AB12 CDE"
-    assert data["recognised"][0]["detail"]["decision"]["relay_command"] == "pulse_sent"
-    assert [event["plate"] for event in data["unfamiliar"]] == ["DEMO123"]
-    assert data["unfamiliar"][0]["expires_at"] == NOW + 250
-    assert len(data["recent_decisions"]) == 3
-    assert data["recent_decisions"][0]["seen_at"] == NOW
-    assert data["recent_decisions"][0]["captured_at"] == stamp(NOW - 600)
-    assert data["decision_sampling"]["retained_limit"] == 200
-    assert data["decisions_available"] is True
+    assert [event["id"] for event in data["arrivals"]] == [20, 19]
+    assert data["arrivals"][0]["plate"] == "AB12 CDE"
+    assert data["arrivals"][0]["detail"]["decision"]["relay_command"] == "pulse_sent"
+    assert data["arrivals"][0]["seen_at"] == NOW - 10
+    assert (
+        not {"recognised", "unfamiliar", "recent_decisions", "decisions_available", "decision_sampling"} & data.keys()
+    )
+    decisions = client.get("/api/decisions?limit=3", headers=HEADERS).get_json()
+    assert len(decisions["decisions"]) == 3
+    assert decisions["decisions"][0]["seen_at"] == NOW
+    assert decisions["decisions"][0]["captured_at"] == stamp(NOW - 600)
+    assert decisions["sampling"]["retained_limit"] == 200
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 23
         assert conn.execute("SELECT COUNT(*) FROM recent_decisions").fetchone()[0] == 6
+
+
+@pytest.mark.parametrize(
+    ("captures", "expected"),
+    [
+        (
+            [("OLDER_MATCH", "recognised", 30), ("UNFAMILIAR", "unmatched", 20), ("NEW_MATCH", "recognised", 10)],
+            ["NEW_MATCH", "OLDER_MATCH"],
+        ),
+        (
+            [
+                ("OLDER_MATCH", "recognised", 40),
+                ("OLD_UNFAMILIAR", "unmatched", 30),
+                ("NEW_MATCH", "recognised", 20),
+                ("NEW_UNFAMILIAR", "unmatched", 10),
+            ],
+            ["NEW_UNFAMILIAR", "NEW_MATCH"],
+        ),
+        (
+            [
+                ("OLDEST_UNFAMILIAR", "unmatched", 900),
+                ("OLDER_UNFAMILIAR", "unmatched", 600),
+                ("NEW_UNFAMILIAR", "unmatched", 10),
+            ],
+            ["NEW_UNFAMILIAR", "OLDER_UNFAMILIAR"],
+        ),
+        (
+            [("OLDEST_MATCH", "recognised", 30), ("OLDER_MATCH", "recognised", 20), ("NEW_MATCH", "recognised", 10)],
+            ["NEW_MATCH", "OLDER_MATCH"],
+        ),
+        (
+            [("OLDER_MATCH", "recognised", 1200), ("UNFAMILIAR", "unmatched", 600)],
+            ["UNFAMILIAR", "OLDER_MATCH"],
+        ),
+        (
+            [
+                ("NEW_MATCH", "recognised", 20),
+                ("UNFAMILIAR", "unmatched", 10),
+                ("FUTURE_MATCH", "recognised", -60),
+                ("FUTURE_UNFAMILIAR", "unmatched", -30),
+            ],
+            ["UNFAMILIAR", "NEW_MATCH"],
+        ),
+        (
+            [("OLDER_MATCH", "recognised", 10), ("UNFAMILIAR", "unmatched", 10), ("NEW_MATCH", "recognised", 10)],
+            ["NEW_MATCH", "OLDER_MATCH"],
+        ),
+        (
+            [("OLD_UNFAMILIAR", "unmatched", 10), ("MATCH", "recognised", 10), ("NEW_UNFAMILIAR", "unmatched", 10)],
+            ["NEW_UNFAMILIAR", "MATCH"],
+        ),
+    ],
+    ids=[
+        "match-latest",
+        "unfamiliar-latest",
+        "no-matches",
+        "no-unfamiliar",
+        "old-unfamiliar",
+        "future-captures",
+        "match-wins-tie",
+        "unfamiliar-wins-tie",
+    ],
+)
+def test_latest_seen_selection(home, captures, expected):
+    client, db, _, _ = home
+    for plate, kind, age in captures:
+        insert_event(str(db), plate=plate, kind=kind, captured_at=stamp(NOW - age))
+    response = client.get("/api/home-status", headers=HEADERS)
+    assert response.status_code == 200
+    arrivals = response.get_json()["arrivals"]
+    assert [event["plate"] for event in arrivals] == expected
+    assert len(arrivals) <= 2
+    assert [(event["captured_at"], event["id"]) for event in arrivals] == sorted(
+        [(event["captured_at"], event["id"]) for event in arrivals], reverse=True
+    )
+    for event in arrivals:
+        assert event["seen_at"] == datetime.strptime(event["captured_at"], "%Y-%m-%d %H:%M:%S").timestamp()
+        assert "expires_at" not in event
+
+
+def test_home_is_independent_of_recent_decision_reads(home, monkeypatch):
+    client, _, _, _ = home
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Home must use sightings rather than diagnostic decision samples")
+
+    monkeypatch.setattr(app, "_recent_decision_payloads", forbidden)
+    assert client.get("/api/home-status", headers=HEADERS).status_code == 200
+
+
+def test_home_metrics_are_lightweight_and_preserve_arrival_measurements(home, monkeypatch):
+    client, db, _, _ = home
+    insert_event(
+        str(db),
+        plate="TEST123",
+        kind="unmatched",
+        captured_at=stamp(NOW - 10),
+        processing_time_ms=0,
+        confidence=92.4,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Home metrics must not invoke the heavier service-health diagnostics")
+
+    monkeypatch.setattr(app, "_systemctl_is_active", forbidden)
+    monkeypatch.setattr(app, "_failed_systemd_units", forbidden)
+    monkeypatch.setattr(app, "_maintenance_health", forbidden)
+    data = client.get("/api/home-status", headers=HEADERS).get_json()
+    assert data["metrics"] == {"temperature_c": 48.6, "disk_free_pct": 12.5}
+    assert data["arrivals"][0]["processing_time_ms"] == 0
+    assert data["arrivals"][0]["confidence"] == 92.4
+    assert data["stream"]["fresh"] is True
+
+
+@pytest.mark.parametrize("temperature", [None, float("nan"), float("inf")])
+def test_unavailable_temperature_does_not_hide_disk_or_camera(home, monkeypatch, temperature):
+    client, _, _, _ = home
+    monkeypatch.setattr(app, "_read_cpu_temperature_c", lambda: temperature)
+    response = client.get("/api/home-status", headers=HEADERS)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["metrics"] == {"temperature_c": None, "disk_free_pct": 12.5}
+    assert data["stream"]["fresh"] is True
+
+
+@pytest.mark.parametrize("failure", ["temperature", "disk", "both"])
+def test_metric_read_failures_are_independent(home, monkeypatch, failure):
+    client, _, _, _ = home
+
+    def unavailable(*args, **kwargs):
+        raise OSError("Synthetic metric unavailable")
+
+    if failure in {"temperature", "both"}:
+        monkeypatch.setattr(app, "_read_cpu_temperature_c", unavailable)
+    if failure in {"disk", "both"}:
+        monkeypatch.setattr(app.shutil, "disk_usage", unavailable)
+    response = client.get("/api/home-status", headers=HEADERS)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["metrics"]["temperature_c"] == (48.6 if failure == "disk" else None)
+    assert data["metrics"]["disk_free_pct"] == (12.5 if failure == "temperature" else None)
+    assert data["arrivals"] == []
+    assert data["stream"]["fresh"] is True
+    assert set(data["services"].values()) == {"active"}
+
+
+@pytest.mark.parametrize("usage", [(0, 0, 0), (100, 101, -1), (100, -1, 101), (float("inf"), 0, float("inf"))])
+def test_invalid_disk_measurements_remain_unavailable(home, monkeypatch, usage):
+    client, _, _, _ = home
+    monkeypatch.setattr(app.shutil, "disk_usage", lambda path: usage)
+    response = client.get("/api/home-status", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.get_json()["metrics"] == {"temperature_c": 48.6, "disk_free_pct": None}
 
 
 @pytest.mark.parametrize("state", ["fresh", "stale", "missing", "empty"])
@@ -105,7 +262,7 @@ def test_empty_home_distinguishes_camera_states(home, state):
     assert data["stream"]["fresh"] is (state == "fresh")
     if state in {"missing", "empty"}:
         assert data["stream"]["age_seconds"] is None
-    assert data["recognised"] == data["unfamiliar"] == data["recent_decisions"] == []
+    assert data["arrivals"] == []
 
 
 def test_service_checks_are_shared_across_screens_and_refresh(home, monkeypatch):
@@ -167,7 +324,7 @@ def test_old_schema_does_not_hide_camera_status(home):
         conn.execute("DROP TABLE recent_decisions")
     response = client.get("/api/home-status", headers=HEADERS)
     assert response.status_code == 200
-    assert response.get_json()["decisions_available"] is False
+    assert response.get_json()["arrivals"] == []
     assert response.get_json()["stream"]["fresh"] is True
     assert client.get("/api/decisions", headers=HEADERS).status_code == 503
 

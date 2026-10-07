@@ -69,6 +69,8 @@ ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml
 The first run may take a while to build OpenALPR. Subsequent deployments preserve
 the Pi's environment file; see [updating configuration](docs/OPERATIONS.md#configuration)
 for deliberate replacements and preview-only tuning.
+Complete deployments also refresh apt's package indexes and apply available
+package upgrades.
 
 ## Screens
 

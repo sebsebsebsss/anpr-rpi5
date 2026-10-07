@@ -17,8 +17,17 @@ export ANSIBLE_BECOME_PASS="$ANSIBLE_BECOME_PASSWORD"
 | Complete installation/update | `ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml` |
 | Web application/assets | `ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml --tags web` |
 | Application and services | `ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml --tags deploy` |
+| OS package updates only | `ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml --tags os_update` |
 | OS packages/OpenALPR configuration | `ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml --tags provision` |
 | Existing nginx configuration only | `ansible-playbook -i inventory.ini -u "$GATEPI_USER" site.yml --tags nginx` |
+
+Complete runs, provisioning runs and `--tags os_update` refresh apt's package
+indexes every time and upgrade installed packages, allowing new dependencies
+while preserving installed configuration and refusing package removals. Package
+updates can restart services; verify the gate services afterwards. The playbook
+reports `/var/run/reboot-required` when present and leaves rebooting manual. On
+the Pi, also check whether a newer kernel was installed, as this marker is not
+always provided. Web and application-only deployments retain their existing scope.
 
 The nginx-only tag validates and reloads nginx without restarting the web
 application. It assumes certificate and stream paths are already configured;
@@ -68,10 +77,22 @@ repeated frames. Expand the pill for the loaded JPEG size, viewport and sampled
 producer age. A fresh preview does not prove the independent recognizer is
 progressing; service activity does not prove physical gate movement.
 
+Home's Latest seen shows at most two captures. A latest recognised sighting shows
+the two latest recognised records; a latest unfamiliar sighting shows that record
+alongside the latest recognised record, when one exists. Without recognised
+history, it shows the latest two unfamiliar sightings. Records retain their
+visible age and have no five-minute expiry. Failed updates preserve the last
+received records and display an unavailable-updates warning.
+
+The compact Home metrics show CPU temperature, latest sighting processing time,
+latest OCR confidence and system disk space free. Unavailable readings show a
+dash. If Home updates stop, live temperature and disk readings become unavailable
+while the last sighting's recorded processing time and confidence remain visible.
+
 Recent decision diagnostics are sampled and bounded to 200 records. They explain
 matches, suppression and command outcomes, rather than recording every analysed
-frame. Statistics count stored detections/commands, not confirmed visits or OCR
-accuracy. An unfamiliar-arrival preview expires after five minutes.
+frame. Use capture history or `/api/decisions` for these diagnostics. Statistics
+count stored detections/commands, not confirmed visits or OCR accuracy.
 
 ## Backups and restore
 

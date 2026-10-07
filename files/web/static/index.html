@@ -78,14 +78,18 @@
 
           <div class="card tablet-timeline">
             <div class="card-head">
-              <h2>Latest recognised</h2>
-              <div class="legend">Last 2 detections</div>
+              <h2>Latest seen</h2>
             </div>
             <div id="tablet-timeline-list" class="tablet-timeline-list"></div>
-            <div id="home-unfamiliar" class="home-unfamiliar" hidden></div>
-            <details id="home-decision" class="home-decision" hidden></details>
             <div id="home-arrival-status" class="meta" hidden></div>
           </div>
+
+          <section class="home-metrics" aria-label="Pi and latest sighting metrics">
+            <div class="home-metric"><span class="home-metric-label">CPU temp</span><strong id="home-cpu-temp">—</strong></div>
+            <div class="home-metric"><span class="home-metric-label">Last processing</span><strong id="home-processing">—</strong></div>
+            <div class="home-metric"><span class="home-metric-label">Last OCR score</span><strong id="home-confidence">—</strong></div>
+            <div class="home-metric"><span class="home-metric-label">Disk free</span><strong id="home-disk-free">—</strong></div>
+          </section>
         </div>
       </section>
 
