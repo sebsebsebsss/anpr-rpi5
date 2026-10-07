@@ -19,6 +19,21 @@ jobs:
       - name: Test image stream refresh
         run: node tests/stream_refresh.js
 
+      - name: Test history pagination and filters
+        run: node tests/history.js
+
+      - name: Test gate controls and request failures
+        run: node tests/gate_controls.js
+
+      - name: Test stream diagnostics and navigation requests
+        run: node tests/web_diagnostics.js
+
+      - name: Test home status, arrivals and allowlist feedback
+        run: node tests/home_status.js
+
+      - name: Test statistics periods, chart bounds and request failures
+        run: node tests/stats.js
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -26,7 +41,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install ruff pytest flask waitress requests
+          pip install -r files/requirements.txt ruff pytest
 
       - name: Lint (ruff check)
         run: ruff check files/ tests/

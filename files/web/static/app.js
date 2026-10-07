@@ -6,8 +6,19 @@ const isMain = document.body.classList.contains("main-page");
 const state = {
   plates: [],
   plateStatus: {},
+  platesSavedSnapshot: null,
+  platesSaving: false,
+  platesMessage: "",
+  platesMessageType: "",
   events: [],
-  eventsOffset: 0,
+  eventsPage: 0,
+  eventsCursors: [null],
+  eventsNextCursor: null,
+  eventsHasMore: false,
+  eventsLoaded: false,
+  eventsWindow: "30d",
+  eventsStartId: null,
+  eventsRequest: 0,
   loadingCandidateEvents: false,
   eventsKinds: new Set(["recognised", "unmatched"]),
   latestRecognised: null,
@@ -22,8 +33,14 @@ const state = {
   timelineTotal: 0,
   timelineTotalPages: 1,
   timelineWindow: "30d",
+  timelineRequest: 0,
   tabletEvents: [],
-  tabletLastFetch: 0,
+  homeStatus: null,
+  homeStatusReceivedAt: null,
+  homeStatusError: false,
+  homeFrame: null,
+  homeStreamError: "",
+  homeSourceIsLocal: false,
   logsLastFetch: 0,
   logsLoading: false,
   logsLines: [],
@@ -41,6 +58,10 @@ const state = {
   loadingTimelineEvents: false,
   gateOpenInFlight: false,
 };
+const visibleTabPollers = [];
+const HOME_STATUS_MAX_AGE_MS = 20000;
+const DISPLAY_STALE_MS = 10000;
+const DISPLAY_LOAD_WINDOW_MS = 5000;
 
 const LEGACY_IOS =
   /iP(ad|hone|od)/.test(navigator.userAgent || "") &&
@@ -113,6 +134,32 @@ function normalizeEventKind(event) {
     return "recognised";
   }
   return base;
+}
+
+function describeDecision(event) {
+  const decision = event && event.detail && event.detail.decision;
+  if (!decision || decision.version !== 1) return "";
+  const reasons = {
+    allowlist_match: "Allowlist match",
+    not_allowlisted: "Plate not on allowlist",
+    no_candidates: "No plate read",
+    recent_allowlisted: "Allowlisted vehicle already handled",
+    recent_vehicle: "Vehicle recently handled",
+    recent_unmatched: "Repeated unmatched read",
+    stale_capture: "Capture too old to act on",
+    relay_error: "Relay command failed",
+  };
+  const matches = { exact: "Exact allowlist match", normalised: "Matched with OCR character correction", fuzzy: "Similar plate matched" };
+  const commands = {
+    pulse_sent: "Relay pulse sent",
+    coalesced: "Used a recent relay pulse",
+    not_requested: "No relay pulse requested",
+    failed_before_activation: "No relay pulse sent",
+    uncertain: "Relay outcome uncertain",
+  };
+  const reason = decision.reason === "allowlist_match" && matches[decision.match_type]
+    ? matches[decision.match_type] : reasons[decision.reason];
+  return [reason, commands[decision.relay_command]].filter(Boolean).join(" • ");
 }
 
 function setStatus(msg) {
@@ -326,8 +373,13 @@ function createLegacyStreamImage(url) {
   const img = new Image();
   img.alt = "Live stream";
   img.className = "stream-image-single";
+  // Updated only by this displayed image's own load/error/watchdog events.
+  img.gateFrameState = {
+    loadedAt: null, lastResult: "loading", startedAt: Date.now(), loadTimes: [], width: 0, height: 0,
+  };
   let timer = null;
   let requestTimeout = null;
+  let requestStartedAt = 0;
   const schedule = (delay) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(loadNext, delay);
@@ -339,19 +391,41 @@ function createLegacyStreamImage(url) {
     schedule(delay);
   };
   const loadNext = () => {
-    if (document.hidden || state.gateOpenInFlight) {
+    const panel = img.closest ? img.closest(".tab-panel") : null;
+    if (document.hidden || state.gateOpenInFlight || (panel && !panel.classList.contains("active"))) {
       schedule(Math.max(250, STREAM_REFRESH_MS));
       return;
     }
     // Wait for this frame before requesting another. Replacing src on a
     // fixed timer can continually cancel slow loads on older iPads.
-    img.onload = () => finish(Math.max(100, STREAM_REFRESH_MS));
-    img.onerror = () => finish(Math.max(1000, STREAM_REFRESH_MS));
+    requestStartedAt = Date.now();
+    // The interval includes download/decode time; adding it after each load
+    // unnecessarily reduced 10 fps streams to 3–4 fps on slower screens.
+    img.onload = () => {
+      const frame = img.gateFrameState;
+      const loadedAt = Date.now();
+      frame.loadedAt = loadedAt;
+      frame.lastResult = "loaded";
+      frame.width = img.naturalWidth || 0;
+      frame.height = img.naturalHeight || 0;
+      frame.loadTimes.push(loadedAt);
+      // Count browser image-load completions, not distinct camera frames.
+      // Only load events mutate this small buffer; no additional polling.
+      while (frame.loadTimes.length > 128 || frame.loadTimes[0] <= loadedAt - DISPLAY_LOAD_WINDOW_MS) {
+        frame.loadTimes.shift();
+      }
+      finish(Math.max(0, STREAM_REFRESH_MS - (Date.now() - requestStartedAt)));
+    };
+    img.onerror = () => {
+      img.gateFrameState.lastResult = "error";
+      finish(Math.max(1000, STREAM_REFRESH_MS));
+    };
     // Recover even when WebKit never delivers a load/error event.
     requestTimeout = setTimeout(() => {
       img.onload = null;
       img.onerror = null;
       img.removeAttribute("src");
+      img.gateFrameState.lastResult = "timeout";
       finish(Math.max(1000, STREAM_REFRESH_MS));
     }, 10000);
     const sep = url.includes("?") ? "&" : "?";
@@ -362,137 +436,77 @@ function createLegacyStreamImage(url) {
 }
 
 function createSmoothImageStream(url) {
-  const stack = document.createElement("div");
-  stack.className = "stream-image-stack";
-  const display = new Image();
-  display.className = "stream-image-single";
-  display.alt = "Live stream";
-  stack.appendChild(display);
+  // Native image replacement retains the previous frame while loading. Using
+  // the same bounded loader on every browser avoids extra fetch/blob/bitmap
+  // conversions and gives desktop screens the same timeout recovery as iOS.
+  return createLegacyStreamImage(url);
+}
 
-  const buffer = new Image();
-  buffer.alt = "Live stream";
+async function fetchJsonWithDeadline(url, init = {}) {
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
   let timer = null;
-  let delayMs = STREAM_REFRESH_MS;
-  let inFlight = false;
-  let activeUrl = "";
-  let bufferUrl = "";
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const canFetchBlob =
-    typeof fetch === "function" &&
-    typeof URL !== "undefined" &&
-    typeof URL.createObjectURL === "function";
-  let useDirect = !canFetchBlob;
-
-  const schedule = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(loadNext, delayMs);
-  };
-
-  const isMostlyBlack = (image) => {
-    if (!ctx) return false;
-    const sampleSize = 16;
-    canvas.width = sampleSize;
-    canvas.height = sampleSize;
+  const request = async () => {
+    const response = await fetch(url, controller ? { ...init, signal: controller.signal } : init);
+    let data;
     try {
-      ctx.drawImage(image, 0, 0, sampleSize, sampleSize);
+      data = await response.json();
     } catch (err) {
-      return false;
+      if (response.ok) throw err;
+      data = {};
     }
-    const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
-    let sum = 0;
-    let sumSq = 0;
-    const count = data.length / 4;
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b);
-      sum += lum;
-      sumSq += lum * lum;
-    }
-    const mean = sum / count;
-    const variance = sumSq / count - mean * mean;
-    return mean < 6 && variance < 6;
+    return { ok: response.ok, data };
   };
-
-  const loadNext = async () => {
-    if (state.gateOpenInFlight) {
-      schedule();
-      return;
-    }
-    if (inFlight) {
-      schedule();
-      return;
-    }
-    inFlight = true;
-    const sep = url.includes("?") ? "&" : "?";
-    const next = `${url}${sep}ts=${Date.now()}&cb=${Math.random().toString(36).slice(2)}`;
-    try {
-      if (!useDirect) {
-        const resp = await fetch(next, { cache: "no-store" });
-        if (!resp.ok) {
-          throw new Error("fetch failed");
-        }
-        const blob = await resp.blob();
-        if (ctx && typeof createImageBitmap === "function") {
-          const bmp = await createImageBitmap(blob);
-          const isBlack = isMostlyBlack(bmp);
-          bmp.close();
-          if (isBlack) {
-            delayMs = Math.min(Math.round(delayMs * 1.2), 1000);
-            schedule();
-            return;
-          }
-        }
-        if (bufferUrl) URL.revokeObjectURL(bufferUrl);
-        bufferUrl = URL.createObjectURL(blob);
-        buffer.src = bufferUrl;
-      } else {
-        buffer.src = next;
-      }
-      buffer.onload = () => {
-        const nextUrl = bufferUrl || buffer.src;
-        display.src = nextUrl;
-        if (activeUrl) URL.revokeObjectURL(activeUrl);
-        activeUrl = bufferUrl || "";
-        bufferUrl = "";
-        buffer.onload = null;
-        buffer.onerror = null;
-        delayMs = STREAM_REFRESH_MS;
-        schedule();
-      };
-      buffer.onerror = () => {
-        buffer.onload = null;
-        buffer.onerror = null;
-        delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
-        schedule();
-      };
-    } catch (err) {
-      useDirect = true;
-      delayMs = Math.min(Math.round(delayMs * 1.5), 1000);
-      schedule();
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  loadNext();
-  return stack;
+  try {
+    // The deadline covers headers AND the body. The losing request can never
+    // apply data later, including on iOS without AbortController support.
+    return await Promise.race([
+      request(),
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          if (controller) controller.abort();
+          reject(new Error("Request timed out"));
+        }, 10000);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 
 async function loadAllowlist() {
   const [platesRes, statusRes] = await Promise.all([
-    fetch("/api/plates"),
-    fetch("/api/allowlist-status"),
+    fetchJsonWithDeadline("/api/plates"),
+    fetchJsonWithDeadline("/api/allowlist-status"),
   ]);
-  state.plates = await platesRes.json();
-  const status = await statusRes.json();
+  if (!platesRes.ok || !statusRes.ok) throw new Error("Could not load plates");
+  const plates = platesRes.data;
+  const status = statusRes.data;
+  if (!Array.isArray(plates) || !Array.isArray(status)) throw new Error("Invalid plate response");
+  state.plates = plates;
   state.plateStatus = {};
   status.forEach((entry) => {
     if (!entry.owner) return;
     state.plateStatus[entry.owner] = entry.plates || [];
   });
+}
+
+function updateAllowlistFeedback() {
+  const dirty = state.platesSavedSnapshot !== JSON.stringify(state.plates);
+  const feedback = document.getElementById("allowlist-status");
+  if (feedback) {
+    feedback.textContent = state.platesSaving ? "Saving changes…"
+      : state.platesMessage || (dirty ? "Unsaved changes" : "All changes saved");
+    feedback.classList.toggle("is-error", state.platesMessageType === "error");
+  }
+  document.querySelectorAll("#plates-list input, #plates-list button, #add-plate, #save-plates").forEach((input) => {
+    input.disabled = state.platesSaving;
+  });
+}
+
+function markAllowlistChanged() {
+  state.platesMessage = "";
+  state.platesMessageType = "";
+  updateAllowlistFeedback();
 }
 
 function renderAllowlist() {
@@ -527,70 +541,139 @@ function renderAllowlist() {
     }
     ownerInput.addEventListener("input", (e) => {
       state.plates[idx].owner = e.target.value;
+      markAllowlistChanged();
     });
     platesInput.addEventListener("input", (e) => {
       const raw = e.target.value.split(",").map((p) => p.trim()).filter(Boolean);
       state.plates[idx].plates = raw.map((p) => p.toUpperCase());
+      markAllowlistChanged();
     });
     removeBtn.addEventListener("click", () => {
       state.plates.splice(idx, 1);
       renderAllowlist();
+      markAllowlistChanged();
     });
     platesList.appendChild(row);
   });
 }
 
 async function saveAllowlist() {
-  setStatus("Saving...");
+  if (state.platesSaving) return;
+  state.platesSaving = true;
+  state.platesMessage = "";
+  state.platesMessageType = "";
+  updateAllowlistFeedback();
   const cleaned = state.plates.map((entry) => ({
     owner: entry.owner,
     plates: (entry.plates || []).map((p) => p.toUpperCase()),
   }));
-  const resp = await fetch("/api/plates", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cleaned),
-  });
-  if (!resp.ok) {
-    const body = await resp.json();
-    setStatus(`Save failed: ${body.error || resp.status}`);
-    return;
+  let saved = false;
+  try {
+    const resp = await fetchJsonWithDeadline("/api/plates", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cleaned),
+    });
+    if (!resp.ok) {
+      let message = "Could not save changes. Try again.";
+      if (resp.data && typeof resp.data.error === "string") message = resp.data.error;
+      state.platesMessage = message;
+      state.platesMessageType = "error";
+      return;
+    }
+    saved = true;
+    state.platesSavedSnapshot = JSON.stringify(state.plates);
+    await loadAllowlist();
+    state.platesSavedSnapshot = JSON.stringify(state.plates);
+    renderAllowlist();
+    state.platesMessage = "All changes saved";
+  } catch (err) {
+    state.platesMessage = saved
+      ? "Saved, but the updated list could not be loaded. Reload to check."
+      : "Could not confirm the save. Your edits are still here; check the connection and try again.";
+    state.platesMessageType = "error";
+  } finally {
+    state.platesSaving = false;
+    updateAllowlistFeedback();
   }
-  await loadAllowlist();
-  renderAllowlist();
-  setStatus("Saved");
 }
 
-async function fetchEvents({ reset = false, limit = 30, kind = null } = {}) {
-  if (state.loadingCandidateEvents) return;
+async function fetchEvents({ reset = false, page = state.eventsPage, startId = null } = {}) {
+  if (state.loadingCandidateEvents && !reset) return;
+  if (reset) page = 0;
+  if (page < 0) return;
+  const requestedStartId = reset ? startId : state.eventsStartId;
+  const cursor = page === state.eventsPage + 1 ? state.eventsNextCursor : state.eventsCursors[page];
+  if (page > 0 && !cursor) return;
+  const requestId = ++state.eventsRequest;
   state.loadingCandidateEvents = true;
-  if (reset) {
-    state.events = [];
-    state.eventsOffset = 0;
-  }
+  updateHistoryPagination();
   try {
     const params = new URLSearchParams({
-      offset: String(state.eventsOffset),
-      limit: String(limit),
+      limit: "30",
+      window: state.eventsWindow,
+      kind: Array.from(state.eventsKinds).join(","),
     });
-    if (kind) {
-      params.set("kind", kind);
-    } else {
-      params.set("kind", "recognised,unmatched,candidate");
-    }
-    const resp = await fetch(`/api/events?${params.toString()}`);
+    if (page > 0) params.set("cursor", cursor);
+    else if (requestedStartId) params.set("start_id", requestedStartId);
+    const resp = await fetch(`/api/history?${params.toString()}`);
     if (!resp.ok) {
       throw new Error(`events ${resp.status}`);
     }
     const data = await resp.json();
-    state.eventsOffset += data.length;
-    state.events = state.events.concat(data);
+    if (requestId !== state.eventsRequest) return;
+    state.events = Array.isArray(data.items) ? data.items : [];
+    state.eventsPage = page;
+    if (reset) state.eventsCursors = [null];
+    state.eventsStartId = requestedStartId;
+    state.eventsCursors[page] = page > 0 ? cursor : null;
+    state.eventsCursors.length = page + 1;
+    state.eventsNextCursor = data.next_cursor || null;
+    state.eventsHasMore = Boolean(data.has_more && state.eventsNextCursor);
+    state.eventsLoaded = true;
   } catch (err) {
-    setStatus("Failed to load events");
+    if (requestId === state.eventsRequest) setStatus("Failed to load history. Try refreshing.");
   } finally {
-    state.loadingCandidateEvents = false;
-    renderEvents();
+    if (requestId === state.eventsRequest) {
+      state.loadingCandidateEvents = false;
+      renderEvents();
+    }
   }
+}
+
+function updateHistoryPagination() {
+  const previous = document.getElementById("history-prev");
+  const next = document.getElementById("history-next");
+  const label = document.getElementById("events-more");
+  if (previous) previous.disabled = state.loadingCandidateEvents || state.eventsPage === 0;
+  if (next) next.disabled = state.loadingCandidateEvents || !state.eventsHasMore;
+  if (label) label.textContent = state.loadingCandidateEvents
+    ? "Loading history…"
+    : `Page ${state.eventsPage + 1}${state.eventsHasMore ? "" : " • End of history"}`;
+}
+
+function historyPreview(event, small = false) {
+  if (small && event.thumbnail_url) return event.thumbnail_url;
+  if (event.preview_url) return event.preview_url;
+  // Also works during a deployment while a browser still has older event JSON.
+  return event.image_url ? event.image_url.replace(/^\/images\//, "/previews/") + `?size=${small ? 160 : 640}` : "";
+}
+
+function deferHistoryImage(img, url) {
+  setLowPriorityImage(img);
+  img.dataset.previewSrc = url;
+}
+
+function loadVisibleHistoryImages() {
+  if (!isTabActive("candidates")) return;
+  // Bounding boxes work on iOS 12, where native image lazy loading is unavailable.
+  document.querySelectorAll("#events-list img[data-preview-src]").forEach((img) => {
+    const rect = img.getBoundingClientRect();
+    if (rect.bottom >= -200 && rect.top <= window.innerHeight + 200) {
+      img.src = img.dataset.previewSrc;
+      delete img.dataset.previewSrc;
+    }
+  });
 }
 
 function parseCapturedEpoch(ts) {
@@ -632,6 +715,8 @@ function groupEventsByWindow(events) {
       } else {
         group.images.push({
           url: event.image_url,
+          preview: historyPreview(event),
+          thumbnail: historyPreview(event, true),
           name: event.image_name,
           confidence: conf,
         });
@@ -714,7 +799,7 @@ function summarizeGroup(events) {
   });
 }
 
-function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
+function renderFrameStrip(images, heroImg, confEl, originalLink, activeIndex = 0) {
   if (!images.length) return null;
   const strip = document.createElement("div");
   strip.className = "frame-strip";
@@ -723,12 +808,14 @@ function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
     setLowPriorityImage(thumb);
     thumb.alt = "frame";
     thumb.className = idx === activeIndex ? "active" : "";
-    thumb.src = img.url;
+    deferHistoryImage(thumb, img.thumbnail);
     if (Number.isFinite(img.confidence)) {
       thumb.title = `Conf: ${img.confidence.toFixed(2)}`;
     }
     thumb.addEventListener("click", () => {
-      heroImg.src = img.url;
+      delete heroImg.dataset.previewSrc;
+      heroImg.src = img.preview;
+      originalLink.href = img.url;
       if (confEl) {
         const nextConf = Number.isFinite(img.confidence) ? img.confidence.toFixed(2) : "--";
         confEl.textContent = `Conf: ${nextConf}`;
@@ -743,7 +830,6 @@ function renderFrameStrip(images, heroImg, confEl, activeIndex = 0) {
 
 function renderEvents() {
   const eventsList = document.getElementById("events-list");
-  const eventsMore = document.getElementById("events-more");
   if (!eventsList) return;
   eventsList.innerHTML = "";
   const groups = groupEventsByWindow(state.events);
@@ -828,6 +914,7 @@ function renderEvents() {
         <div class="plate">${escapeHtml(best.plate)}</div>
         <div class="meta">${escapeHtml(best.kind)} • ${bestMeta} ${best.owner ? `• ${escapeHtml(best.owner)}` : ""}</div>
         ${observedLine}
+        ${describeDecision(bestEvent) ? `<div class="decision-note">${escapeHtml(describeDecision(bestEvent))}</div>` : ""}
       `;
     }
     left.appendChild(header);
@@ -883,8 +970,14 @@ function renderEvents() {
       img.className = "event-image";
       setLowPriorityImage(img);
       img.alt = "capture";
-      img.src = heroImage;
-      imageWrap.appendChild(img);
+      deferHistoryImage(img, bestImage ? bestImage.preview : group.images[0].preview);
+      const originalLink = document.createElement("a");
+      originalLink.href = heroImage;
+      originalLink.target = "_blank";
+      originalLink.rel = "noopener";
+      originalLink.title = "Open full-size capture";
+      originalLink.appendChild(img);
+      imageWrap.appendChild(originalLink);
       const conf = document.createElement("div");
       conf.className = "event-image-conf";
       const startConf =
@@ -901,7 +994,7 @@ function renderEvents() {
           0,
           group.images.findIndex((image) => image.url === heroImage)
         );
-        const strip = renderFrameStrip(group.images, img, conf, idx);
+        const strip = renderFrameStrip(group.images, img, conf, originalLink, idx);
         if (strip) actions.appendChild(strip);
         right.appendChild(actions);
       }
@@ -912,14 +1005,13 @@ function renderEvents() {
     eventsList.appendChild(card);
   });
 
-  if (eventsMore) {
-    eventsMore.textContent = state.loadingCandidateEvents ? "Loading..." : "Scroll for more";
-  }
+  updateHistoryPagination();
+  loadVisibleHistoryImages();
   if (state.events.length === 0 || filtered.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     const kinds = Array.from(state.eventsKinds).join(", ");
-    empty.textContent = `No ${kinds} events yet.`;
+    empty.textContent = `No ${kinds} events in this date range.`;
     eventsList.appendChild(empty);
   }
   renderLatestEvent();
@@ -938,7 +1030,7 @@ function renderLatestImage() {
   setLowPriorityImage(image);
   image.alt = event.plate || "capture";
   image.classList.add("latest-thumb");
-  image.src = event.image_url;
+  image.src = historyPreview(event);
   image.addEventListener("click", () => {
     if (event && event.id) {
       jumpToEvent(String(event.id));
@@ -1044,6 +1136,7 @@ function setActiveTab(target, { updateHash = true } = {}) {
   if (target === "plates") {
     target = "candidates";
   }
+  document.body.classList.toggle("home-active", target === "home");
   const tabs = document.querySelectorAll(".tab[data-tab]");
   const panels = document.querySelectorAll(".tab-panel");
   tabs.forEach((btn) => {
@@ -1056,12 +1149,19 @@ function setActiveTab(target, { updateHash = true } = {}) {
     panel.classList.toggle("active", isActive);
     panel.setAttribute("aria-hidden", String(!isActive));
   });
-  if (target === "candidates" && state.events.length === 0) {
-    state.eventsKinds = new Set(["recognised", "unmatched"]);
+  if (target === "home") {
+    renderHomeStatus();
+    renderHomeArrivals();
+    if (state.homeStatus) renderTabletTimeline();
+    fitHomeStream();
+  }
+  visibleTabPollers.forEach((poll) => poll());
+  if (target === "candidates" && !state.eventsLoaded && !state.loadingCandidateEvents) {
     fetchEvents({ reset: true });
   }
   if (target === "candidates") {
     renderLatestImage();
+    loadVisibleHistoryImages();
   }
   if (target === "timeline" && !state.timelineLoaded) {
     initTimeline();
@@ -1300,6 +1400,13 @@ function setKindFilters(kinds) {
   renderEvents();
 }
 
+function showHistoryForKinds(kinds) {
+  setKindFilters(kinds);
+  const pending = fetchEvents({ reset: true });
+  setActiveTab("candidates");
+  return pending;
+}
+
 function initFilters() {
   const chips = document.querySelectorAll("#tab-candidates .chip");
   if (!chips.length) return;
@@ -1318,11 +1425,7 @@ function initFilters() {
         state.eventsKinds = new Set(["recognised", "unmatched"]);
         chips.forEach((btn) => btn.classList.add("active"));
       }
-      if (state.events.length === 0) {
-        fetchEvents({ reset: true });
-      } else {
-        renderEvents();
-      }
+      fetchEvents({ reset: true });
     });
   });
 }
@@ -1342,6 +1445,7 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
     setGateStatus(gateStatus, "opening", "Gate opening");
     setGateButtonState(gateBtn, "opening");
     state.gateOpenInFlight = true;
+    let failed = false;
     try {
       const resp = await fetchOpenGate();
       if (resp.status === 429) {
@@ -1350,11 +1454,16 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
         setStatus(`Opening the gate (${retryIn}s)`);
         startCooldownCountdown(retryIn, { gateBtn, gateStatus, cooldownEl });
       } else if (!resp.ok) {
+        failed = true;
         let message = "Open failed";
+        let retryIn = 0;
         try {
           const data = await resp.json();
           if (data && data.error === "stale_open_request") {
             message = "Open request expired";
+          } else if (data && data.may_have_activated) {
+            message = "Gate response uncertain — check gate";
+            retryIn = Number(data.retry_in) || 30;
           }
         } catch (err) {
           // Keep the generic failure message if the response is not JSON.
@@ -1362,12 +1471,16 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
         setStatus(message);
         setGateStatus(gateStatus, "error", message);
         setGateButtonState(gateBtn, "error");
+        if (retryIn > 0) {
+          startCooldownCountdown(retryIn, { gateBtn, gateStatus, cooldownEl, errorLabel: message });
+        }
       } else {
         setStatus("Gate opened");
         initCooldownStatus();
         refreshGateLastOpen();
       }
     } catch (err) {
+      failed = true;
       const message = err && err.name === "AbortError" ? "Open timed out" : "Open failed";
       setStatus(message);
       setGateStatus(gateStatus, "error", message);
@@ -1376,30 +1489,33 @@ function initGateButtonFor({ buttonId, statusId, cooldownId }) {
       state.gateOpenInFlight = false;
       if (!gateBtn.dataset.cooldown) {
         gateBtn.disabled = false;
-        gateBtn.textContent = "Open the gate";
-        setGateStatus(gateStatus, "ready", "Gate ready");
-        setGateButtonState(gateBtn, "ready");
+        gateBtn.textContent = "Open Sesame!";
+        if (!failed) {
+          setGateStatus(gateStatus, "ready", "Gate ready");
+          setGateButtonState(gateBtn, "ready");
+        }
         if (cooldownEl) cooldownEl.textContent = "Opening the gate: --";
       }
     }
   });
 }
 
-function startCooldownCountdown(seconds, { gateBtn, gateStatus, cooldownEl }) {
+function startCooldownCountdown(seconds, { gateBtn, gateStatus, cooldownEl, errorLabel = "" }) {
   if (!gateBtn) return;
   gateBtn.dataset.cooldown = "true";
   let remaining = seconds;
-  setGateStatus(gateStatus, "opening", "Gate opening");
-  setGateButtonState(gateBtn, "opening");
+  setGateStatus(gateStatus, errorLabel ? "error" : "opening", errorLabel || "Gate opening");
+  setGateButtonState(gateBtn, errorLabel ? "error" : "opening");
   const tick = () => {
-    if (cooldownEl) cooldownEl.textContent = `Opening the gate: ${remaining}s`;
-    gateBtn.textContent = `Opening the gate: ${remaining}s`;
+    const label = errorLabel ? `Retry available in ${remaining}s` : `Opening the gate: ${remaining}s`;
+    if (cooldownEl) cooldownEl.textContent = label;
+    gateBtn.textContent = label;
     gateBtn.disabled = true;
     remaining -= 1;
     if (remaining < 0) {
       gateBtn.dataset.cooldown = "";
       gateBtn.disabled = false;
-      gateBtn.textContent = "Open the gate";
+      gateBtn.textContent = "Open Sesame!";
       setGateStatus(gateStatus, "ready", "Gate ready");
       setGateButtonState(gateBtn, "ready");
       if (cooldownEl) cooldownEl.textContent = "Opening the gate: --";
@@ -1410,59 +1526,69 @@ function startCooldownCountdown(seconds, { gateBtn, gateStatus, cooldownEl }) {
   tick();
 }
 
-function initInfiniteScroll() {
-  window.addEventListener("scroll", () => {
-    const platesPanel = document.getElementById("tab-candidates");
-    if (!platesPanel || !platesPanel.classList.contains("active")) return;
-    const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 200;
-    if (!nearBottom) return;
-    fetchEvents();
+function initHistoryPagination() {
+  const previous = document.getElementById("history-prev");
+  const next = document.getElementById("history-next");
+  const refresh = document.getElementById("history-refresh");
+  const windowSelect = document.getElementById("history-window");
+  const movePage = async (page) => {
+    await fetchEvents({ page });
+    const list = document.getElementById("history-controls");
+    if (list) list.scrollIntoView({ block: "start" });
+    loadVisibleHistoryImages();
+  };
+  if (previous) previous.addEventListener("click", () => movePage(state.eventsPage - 1));
+  if (next) next.addEventListener("click", () => movePage(state.eventsPage + 1));
+  if (refresh) refresh.addEventListener("click", () => fetchEvents({ reset: true }));
+  if (windowSelect) windowSelect.addEventListener("change", () => {
+    state.eventsWindow = windowSelect.value;
+    fetchEvents({ reset: true });
   });
+  let scheduled = false;
+  const scheduleImages = () => {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(() => {
+      scheduled = false;
+      loadVisibleHistoryImages();
+    }, 80);
+  };
+  window.addEventListener("scroll", scheduleImages, { passive: true });
+  window.addEventListener("resize", scheduleImages);
 }
 
 function initLatestJump() {
   const latestJump = document.getElementById("latest-jump");
   if (!latestJump) return;
-  latestJump.addEventListener("click", () => {
-    const historyTab = document.querySelector('.tab[data-tab="candidates"]');
-    if (historyTab) historyTab.click();
+  latestJump.addEventListener("click", async () => {
+    if (state.latestRecognised && state.latestRecognised.id) {
+      jumpToEvent(String(state.latestRecognised.id));
+      return;
+    }
+    setActiveTab("candidates");
     setKindFilters(["recognised"]);
-    fetchEvents({ reset: true });
-    setTimeout(() => {
-      const latest = document.getElementById("event-latest");
-      if (latest) {
-        latest.scrollIntoView({ behavior: "smooth", block: "center" });
-        latest.classList.add("highlight");
-        setTimeout(() => latest.classList.remove("highlight"), 1200);
-      }
-    }, 200);
+    await fetchEvents({ reset: true });
   });
 }
 
-function jumpToEvent(eventId) {
-  const historyTab = document.querySelector('.tab[data-tab="candidates"]');
-  if (historyTab) historyTab.click();
+async function jumpToEvent(eventId) {
+  setActiveTab("candidates");
   setKindFilters(["recognised", "unmatched"]);
-  fetchEvents({ reset: true });
-  const attempt = (tries = 0) => {
-    const cards = document.querySelectorAll(".event-card[data-event-ids]");
-    for (const card of cards) {
-      const ids = (card.dataset.eventIds || "").split(",").map((id) => id.trim());
-      if (ids.includes(eventId)) {
-        card.scrollIntoView({ behavior: "smooth", block: "center" });
-        card.classList.add("highlight");
-        setTimeout(() => card.classList.remove("highlight"), 1200);
-        return;
-      }
+  state.eventsWindow = "all";
+  const windowSelect = document.getElementById("history-window");
+  if (windowSelect) windowSelect.value = "all";
+  await fetchEvents({ reset: true, startId: eventId });
+  const cards = document.querySelectorAll(".event-card[data-event-ids]");
+  for (const card of cards) {
+    const ids = (card.dataset.eventIds || "").split(",");
+    if (ids.includes(eventId)) {
+      card.scrollIntoView({ block: "center" });
+      loadVisibleHistoryImages();
+      card.classList.add("highlight");
+      setTimeout(() => card.classList.remove("highlight"), 1200);
+      break;
     }
-    if (tries < 6) {
-      if (!state.loadingCandidateEvents) {
-        fetchEvents();
-      }
-      setTimeout(() => attempt(tries + 1), 500);
-    }
-  };
-  setTimeout(() => attempt(0), 300);
+  }
 }
 
 async function initCooldownStatus() {
@@ -1493,7 +1619,66 @@ async function initCooldownStatus() {
   }
 }
 
+function fitHomeStream() {
+  if (!isTabActive("home")) return;
+  const kiosk = document.body.classList.contains("fullscreen-page");
+  if (window.innerWidth < (kiosk ? 721 : 900)) return;
+  const grid = document.querySelector(".tablet-grid");
+  const stream = document.querySelector(".tablet-stream");
+  const timeline = document.querySelector(".tablet-timeline");
+  const metrics = document.querySelector(".home-metrics");
+  const frame = document.getElementById("tablet-stream-frame");
+  if (!grid || !stream || !timeline || !frame) return;
+  const head = stream.querySelector(".card-head");
+  const image = frame.querySelector("img");
+  const loaded = state.homeFrame;
+  const ratio = image && image.naturalWidth && image.naturalHeight
+    ? image.naturalWidth / image.naturalHeight
+    : loaded && loaded.width && loaded.height ? loaded.width / loaded.height : 16 / 9;
+  const spacing = getComputedStyle(stream);
+  const paddingX = parseFloat(spacing.paddingLeft) + parseFloat(spacing.paddingRight);
+  const paddingY = parseFloat(spacing.paddingTop) + parseFloat(spacing.paddingBottom);
+  const gridGap = parseFloat(getComputedStyle(grid).rowGap) || 0;
+  const cardGap = parseFloat(spacing.rowGap) || 0;
+  const availableWidth = timeline.getBoundingClientRect().width - paddingX;
+  // The camera, sightings and metrics sit together at the top. The gate spans
+  // those three rows; any surplus height stays outside the content cards.
+  // A second pass accounts for a header wrapping on a very short display.
+  for (let pass = 0; pass < 2; pass++) {
+    const metricsHeight = metrics ? metrics.getBoundingClientRect().height : 0;
+    const availableHeight = grid.clientHeight - timeline.getBoundingClientRect().height - metricsHeight - 3 * gridGap
+      - paddingY - head.getBoundingClientRect().height - cardGap;
+    const width = Math.max(1, Math.min(availableWidth, availableHeight * ratio));
+    frame.style.setProperty("--home-stream-width", `${width}px`);
+    frame.style.setProperty("--home-stream-height", `${width / ratio}px`);
+    stream.style.setProperty("--home-stream-card-width", `${width + paddingX}px`);
+  }
+}
+
+function initHomeViewport() {
+  // iOS 12's 100vh includes space behind Safari's address bar. Use the actual
+  // visible height for the fixed wall layouts, leaving other tabs and phones
+  // free to scroll. Modern browsers also report changing browser chrome here.
+  const viewport = window.visualViewport;
+  const update = () => {
+    let height = window.innerHeight;
+    if (viewport && viewport.scale === 1 && viewport.height > 0) {
+      height = Math.min(height, viewport.height);
+    }
+    if (Number.isFinite(height) && height > 0) {
+      document.documentElement.style.setProperty("--home-viewport-height", `${Math.floor(height)}px`);
+      fitHomeStream();
+    }
+  };
+  update();
+  window.addEventListener("resize", update);
+  window.addEventListener("orientationchange", update);
+  window.addEventListener("pageshow", update);
+  if (viewport) viewport.addEventListener("resize", update);
+}
+
 async function initMain() {
+  initHomeViewport();
   try {
     const resp = await fetch("/api/config");
     const data = await resp.json();
@@ -1508,13 +1693,13 @@ async function initMain() {
   }
   initTabs();
   initGateButtonFor({ buttonId: "open-gate", statusId: "gate-status", cooldownId: "cooldown-status" });
-  initInfiniteScroll();
+  initHistoryPagination();
   initFilters();
   initLatestJump();
   updateStatusTimestamp();
   setKindFilters(["recognised", "unmatched"]);
   state.latestRecognised = null;
-  if (isTabActive("candidates") && state.events.length === 0 && !state.loadingCandidateEvents) {
+  if (isTabActive("candidates") && !state.eventsLoaded && !state.loadingCandidateEvents) {
     await fetchEvents({ reset: true });
   }
   initCooldownStatus();
@@ -1527,12 +1712,10 @@ async function initMain() {
   }, 30000);
   setInterval(refreshGateLastOpen, 30000);
   setInterval(() => {
-    if (isTabActive("home")) {
-      const now = Date.now();
-      if (now - state.tabletLastFetch > 5000) {
-        state.tabletLastFetch = now;
-        fetchTabletTimeline();
-      }
+    if (!document.hidden && isTabActive("home")) {
+      renderHomeStatus();
+      renderHomeArrivals();
+      updateTabletTimelineRelativeTimes();
     }
     updateStatusTimestamp();
   }, 1000);
@@ -1546,73 +1729,263 @@ async function initTablet() {
     cooldownId: "tablet-cooldown",
   });
   initTabletStream();
-  fetchTabletTimeline({ reset: true });
+  pollVisibleTab(fetchHomeStatus, 5000, "home");
   initCooldownStatus();
+}
+
+function homeStreamUrl(data) {
+  let url = (data.url || "").trim();
+  if (LEGACY_IOS) url = "/static/stream.jpg";
+  if (url !== "/static/stream.jpg") return url;
+  const profiles = data.profiles || {};
+  const kiosk = document.body.classList.contains("fullscreen-page");
+  const tablet = /iP(ad|hone|od)/.test(navigator.userAgent || "") || window.innerWidth <= 1100;
+  const profile = kiosk ? "kiosk" : tablet ? "tablet" : null;
+  // Only the known local JPEG endpoints can replace the configured feed.
+  const candidate = profile && profiles[profile];
+  return candidate === `/static/stream-${profile}.jpg` ? candidate : url;
 }
 
 async function initTabletStream() {
   const frame = document.getElementById("tablet-stream-frame");
-  const status = document.getElementById("tablet-stream-status");
   if (!frame) return;
-  if (status) status.textContent = "Loading stream...";
   try {
     const resp = await fetch("/api/stream");
+    if (!resp.ok) throw new Error("Stream configuration unavailable");
     const data = await resp.json();
-    let url = (data.url || "").trim();
+    const url = homeStreamUrl(data);
     if (!url) {
-      if (status) status.textContent = "No stream configured.";
+      state.homeStreamError = "No stream configured";
+      renderHomeStatus();
       return;
     }
     const lower = url.toLowerCase();
     if (lower.startsWith("rtsp://")) {
-      if (status) status.textContent = "RTSP not supported in browsers.";
+      state.homeStreamError = "Stream format unavailable";
+      renderHomeStatus();
       return;
     }
-    if (LEGACY_IOS) {
-      url = "/static/stream.jpg";
-      frame.innerHTML = "";
-      frame.appendChild(createLegacyStreamImage(url));
-      if (status) status.textContent = "Live";
-      return;
-    }
-    const stack = createSmoothImageStream(url);
+    const parsed = new URL(url, window.location.href);
+    state.homeSourceIsLocal = parsed.origin === window.location.origin &&
+      /^\/static\/stream(?:-tablet|-kiosk)?\.jpg$/.test(parsed.pathname);
+    const stack = LEGACY_IOS ? createLegacyStreamImage(url) : createSmoothImageStream(url);
     frame.innerHTML = "";
     frame.appendChild(stack);
-    if (status) status.textContent = "Live";
+    let loadedRatio = null;
+    stack.addEventListener("load", () => {
+      const ratio = stack.naturalWidth / stack.naturalHeight;
+      if (Number.isFinite(ratio) && ratio > 0 && ratio !== loadedRatio) {
+        loadedRatio = ratio;
+        fitHomeStream();
+      }
+    });
+    state.homeFrame = stack.gateFrameState;
+    state.homeStreamError = "";
+    renderHomeStatus();
+    fitHomeStream();
   } catch (err) {
-    if (status) status.textContent = "Stream failed.";
+    state.homeStreamError = "Stream unavailable";
+    renderHomeStatus();
   }
 }
 
-async function fetchTabletTimeline({ reset = false } = {}) {
-  const list = document.getElementById("tablet-timeline-list");
-  if (!list) return;
-  if (reset) state.tabletEvents = [];
-  try {
-    const resp = await fetch("/api/events?offset=0&limit=2&kind=recognised&window=30d");
-    const data = await resp.json();
-    const same =
-      Array.isArray(state.tabletEvents) &&
-      state.tabletEvents.length === data.length &&
-      state.tabletEvents.every((event, idx) => {
-        const next = data[idx] || {};
-        return (
-          event.id === next.id &&
-          event.captured_at === next.captured_at &&
-          event.image_url === next.image_url &&
-          event.plate === next.plate &&
-          event.owner === next.owner
-        );
-      });
-    if (!same) {
-      state.tabletEvents = data;
-      renderTabletTimeline();
-    } else {
-      updateTabletTimelineRelativeTimes();
-    }
-  } catch (err) {
-    // silent
+function homeServerNow() {
+  if (!state.homeStatus || state.homeStatusReceivedAt === null) return null;
+  return state.homeStatus.server_time + Math.max(0, Date.now() - state.homeStatusReceivedAt) / 1000;
+}
+
+function homeSeenAge(seenAt) {
+  const now = homeServerNow();
+  return now !== null && Number.isFinite(seenAt) ? Math.max(0, (now - seenAt) * 1000) : null;
+}
+
+function homeStatusIsCurrent() {
+  return state.homeStatus !== null && !state.homeStatusError && state.homeStatusReceivedAt !== null &&
+    Date.now() - state.homeStatusReceivedAt <= HOME_STATUS_MAX_AGE_MS;
+}
+
+function renderHomeStatus() {
+  const badge = document.getElementById("tablet-stream-status");
+  if (!badge) return;
+  const frame = state.homeFrame;
+  const measuredAt = Date.now();
+  const frameAge = frame && frame.loadedAt !== null ? Math.max(0, measuredAt - frame.loadedAt) : null;
+  const hasLoadSamples = frame && Array.isArray(frame.loadTimes);
+  const duration = hasLoadSamples ? Math.min(DISPLAY_LOAD_WINDOW_MS, Math.max(0, measuredAt - frame.startedAt)) : 0;
+  let displayRate = null;
+  if (hasLoadSamples && duration >= 1000) {
+    const recentLoads = frame.loadTimes.filter((time) => time > measuredAt - DISPLAY_LOAD_WINDOW_MS && time <= measuredAt).length;
+    displayRate = (recentLoads * 1000 / duration).toFixed(1);
   }
+  const snapshot = state.homeStatus;
+  const current = homeStatusIsCurrent();
+  const now = homeServerNow();
+  const stream = snapshot && snapshot.stream || {};
+  // This is the JPEG age observed by the last status poll, not the age of
+  // the currently displayed image. The producer can replace it between polls.
+  const sourceAge = Number.isFinite(stream.age_seconds) && stream.age_seconds >= 0
+    ? stream.age_seconds : null;
+  const threshold = Number.isFinite(stream.stale_after_seconds) ? stream.stale_after_seconds : 15;
+  let label = displayRate === null ? "View updating" : `View ${displayRate} FPS`;
+  let kind = "ok";
+  if (state.homeStreamError) {
+    label = state.homeStreamError;
+    kind = "bad";
+  } else if (frame && frame.lastResult === "error") {
+    label = "View interrupted";
+    kind = "bad";
+  } else if (frame && (frame.lastResult === "timeout" || frameAge !== null && frameAge > DISPLAY_STALE_MS)) {
+    label = "Frame stalled";
+    kind = "bad";
+  } else if (frameAge === null) {
+    label = "Loading view…";
+    kind = "unknown";
+  } else if (!current) {
+    label = "Status unavailable";
+    kind = "unknown";
+  } else if (state.homeSourceIsLocal && (!stream.fresh || sourceAge === null || sourceAge > threshold)) {
+    label = "Source stale";
+    kind = "bad";
+  }
+  if (kind === "ok" && displayRate !== null) {
+    let value = badge.querySelector(".view-fps-value");
+    if (!value) {
+      const caption = document.createElement("span");
+      caption.textContent = "View ";
+      value = document.createElement("span");
+      value.className = "view-fps-value";
+      caption.appendChild(value);
+      caption.appendChild(document.createTextNode(" FPS"));
+      badge.textContent = "";
+      badge.appendChild(caption);
+    }
+    if (value.textContent !== displayRate) value.textContent = displayRate;
+  } else if (badge.textContent !== label) {
+    badge.textContent = label;
+  }
+  badge.className = `live-badge status-${kind}`;
+  badge.title = "FPS counts completed JPEG loads over up to five seconds, including repeated camera frames. Tap for details.";
+  const serviceLabels = { alprd: "Recognition service", gate_anpr: "Gate worker", stream_jpeg: "Frame service", beanstalkd: "Queue" };
+  const servicesCurrent = current && Number.isFinite(snapshot.services_checked_at) && now - snapshot.services_checked_at <= 20;
+  const services = snapshot && snapshot.services || {};
+  const issues = servicesCurrent ? Object.keys(serviceLabels).filter((key) => services[key] !== "active") : [];
+  const sourcePill = document.getElementById("tablet-source-status");
+  if (sourcePill) {
+    sourcePill.hidden = !state.homeSourceIsLocal;
+    const sourceKnown = current && sourceAge !== null;
+    const sourceFresh = sourceKnown && stream.fresh && sourceAge <= threshold;
+    sourcePill.textContent = sourceKnown ? sourceFresh ? "Pi frame fresh" : "Pi frame stale" : "Source unknown";
+    sourcePill.className = `live-badge status-${sourceKnown ? sourceFresh ? "neutral" : "bad" : "unknown"}`;
+  }
+  const servicePill = document.getElementById("tablet-service-status");
+  if (servicePill) {
+    servicePill.textContent = !servicesCurrent ? "Services unknown" : issues.length ? "Service issue" : "Services active";
+    servicePill.className = `live-badge status-${!servicesCurrent ? "unknown" : issues.length ? "bad" : "neutral"}`;
+  }
+  const system = document.getElementById("tablet-system-status");
+  if (system) {
+    const parts = [frameAge === null ? "No image loaded" : `Image loaded ${Math.floor(frameAge / 1000)}s ago`];
+    if (state.homeSourceIsLocal) {
+      const checkedAgo = state.homeStatusReceivedAt === null ? null
+        : Math.floor(Math.max(0, Date.now() - state.homeStatusReceivedAt) / 1000);
+      parts.push(current && sourceAge !== null
+        ? `Pi JPEG was ${sourceAge.toFixed(1)}s old when checked ${checkedAgo}s ago`
+        : "Pi frame status unavailable");
+    }
+    if (!servicesCurrent) {
+      parts.push("Service status unavailable");
+    } else {
+      parts.push(issues.length ? issues.map((key) => {
+        return `${serviceLabels[key]} ${services[key] === "inactive" || services[key] === "failed" ? "inactive" : "unknown"}`;
+      }).join("; ") : "Services active");
+    }
+    let viewportHeight = window.innerHeight;
+    const viewport = window.visualViewport;
+    if (viewport && viewport.scale === 1 && viewport.height > 0) {
+      viewportHeight = Math.min(viewportHeight, viewport.height);
+    }
+    if (window.innerWidth > 0 && viewportHeight > 0) {
+      parts.push(`Viewport ${Math.floor(window.innerWidth)}×${Math.floor(viewportHeight)} CSS px`);
+    }
+    if (frame && frame.width > 0 && frame.height > 0) {
+      parts.push(`JPEG ${frame.width}×${frame.height}`);
+    }
+    if (hasLoadSamples) {
+      if (displayRate !== null) {
+        parts.push(`Image loads ${displayRate}/s (last ${Math.round(duration / 1000)}s; not distinct frames)`);
+      } else {
+        parts.push("Measuring image loads…");
+      }
+    }
+    parts.push("Service activity does not confirm recognition is progressing.");
+    const detail = parts.join(" • ");
+    if (system.textContent !== detail) system.textContent = detail;
+  }
+}
+
+async function fetchHomeStatus() {
+  let timeout = null;
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
+  try {
+    if (controller) timeout = setTimeout(() => controller.abort(), 10000);
+    const resp = await fetch("/api/home-status", controller ? { signal: controller.signal } : {});
+    if (!resp.ok) throw new Error("Home status unavailable");
+    const data = await resp.json();
+    if (!data || !Number.isFinite(data.server_time)) throw new Error("Invalid home status");
+    const firstSnapshot = state.homeStatus === null;
+    state.homeStatus = data;
+    state.homeStatusReceivedAt = Date.now();
+    state.homeStatusError = false;
+    const arrivals = Array.isArray(data.arrivals) ? data.arrivals.slice(0, 2) : [];
+    if (firstSnapshot || JSON.stringify(state.tabletEvents) !== JSON.stringify(arrivals)) {
+      state.tabletEvents = arrivals;
+      if (!document.hidden && isTabActive("home")) renderTabletTimeline();
+    }
+    updateTabletTimelineRelativeTimes();
+  } catch (err) {
+    state.homeStatusError = true;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    renderHomeStatus();
+    renderHomeArrivals();
+  }
+}
+
+function renderHomeArrivals() {
+  if (document.hidden || !isTabActive("home")) return;
+  renderHomeMetrics();
+  const status = document.getElementById("home-arrival-status");
+  if (status) {
+    const wasHidden = status.hidden;
+    status.hidden = homeStatusIsCurrent();
+    status.textContent = state.homeStatus ? "Home updates unavailable; showing last received sightings." :
+      state.homeStatusError ? "Home updates unavailable." : "Loading recent arrivals…";
+    if (wasHidden !== status.hidden) fitHomeStream();
+  }
+}
+
+function renderHomeMetrics() {
+  const snapshot = state.homeStatus;
+  const metrics = snapshot && snapshot.metrics || {};
+  const latest = snapshot && Array.isArray(snapshot.arrivals) && snapshot.arrivals[0] || {};
+  const current = homeStatusIsCurrent();
+  const percent = value => Number.isFinite(value) && value >= 0 && value <= 100;
+  const readings = [
+    ["home-cpu-temp", current && Number.isFinite(metrics.temperature_c)
+      ? `${metrics.temperature_c.toFixed(1)}°C` : "—", "Current Pi CPU temperature"],
+    ["home-processing", Number.isFinite(latest.processing_time_ms) && latest.processing_time_ms >= 0
+      ? formatProcessingTime(latest.processing_time_ms).replace(/(ms|s)$/, " $1") : "—", "Recognition processing time for the latest sighting"],
+    ["home-confidence", percent(latest.confidence)
+      ? `${latest.confidence.toFixed(1)}%` : "—", "OCR confidence for the latest sighting"],
+    ["home-disk-free", current && percent(metrics.disk_free_pct)
+      ? `${metrics.disk_free_pct.toFixed(0)}%` : "—", "Free space on the Pi system disk"],
+  ];
+  readings.forEach(([id, value, description]) => {
+    const node = document.getElementById(id);
+    if (!node) return;
+    if (node.textContent !== value) node.textContent = value;
+    node.title = value === "—" ? `${description}: unavailable` : description;
+  });
 }
 
 function renderTabletTimeline() {
@@ -1622,22 +1995,27 @@ function renderTabletTimeline() {
   state.tabletEvents.forEach((event) => {
     const row = document.createElement("div");
     row.className = "tablet-timeline-row";
+    if (event.kind === "unmatched") row.classList.add("unmatched");
     const thumb = event.image_url
-      ? `<img src="${escapeHtml(event.image_url)}" alt="capture" loading="lazy" decoding="async" fetchpriority="low" />`
+      ? `<img src="${escapeHtml(historyPreview(event, true))}" alt="capture" loading="lazy" decoding="async" fetchpriority="low" />`
       : `<div class="tablet-thumb-placeholder"></div>`;
-    const ageMinutes = getAgeMinutes(event.captured_at);
+    const seenAge = homeSeenAge(event.seen_at);
+    const ageMinutes = seenAge === null ? getAgeMinutes(event.captured_at) : Math.floor(seenAge / 60000);
     const dotClass = ageMinutes !== null && ageMinutes < 60 ? "dot-fresh" : "dot-stale";
-    const rel = formatRelative(event.captured_at);
+    const rel = seenAge === null ? formatRelative(event.captured_at) : formatRelativeDelta(seenAge);
     const timestamp = escapeHtml(event.captured_at || "");
+    const plate = event.plate && event.plate !== "UNKNOWN" ? event.plate : "Plate unreadable";
+    const label = `${plate}${event.owner ? ` - ${event.owner}` : ""}`;
+    const seenAttr = Number.isFinite(event.seen_at) ? `data-tablet-seen-at="${event.seen_at}"` : "";
     row.innerHTML = `
       <div class="tablet-thumb">${thumb}</div>
       <div class="tablet-info">
-        <div class="plate">${escapeHtml(event.plate || "UNKNOWN")}${event.owner ? ` - ${escapeHtml(event.owner)}` : ""}</div>
-        <div class="meta">${escapeHtml(formatDayTimeLabel(event.captured_at))} - <span data-tablet-relative="${timestamp}">${escapeHtml(rel)}</span></div>
-      </div>
-      <div class="tablet-time">
-        <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}"></span>
-        <span data-tablet-relative="${timestamp}">${escapeHtml(rel)}</span>
+        <div class="plate" title="${escapeHtml(label)}">${escapeHtml(label)}</div>
+        <div class="meta" title="${timestamp}">
+          <span class="dot ${dotClass}" data-tablet-relative-dot="${timestamp}" ${seenAttr} aria-hidden="true"></span>
+          ${event.kind === "unmatched" ? '<span class="arrival-kind">Unfamiliar</span>' : ""}
+          <span data-tablet-relative="${timestamp}" ${seenAttr}>${escapeHtml(rel)}</span>
+        </div>
       </div>
     `;
     if (!document.body.classList.contains("fullscreen-page")) {
@@ -1653,19 +2031,22 @@ function renderTabletTimeline() {
   if (!state.tabletEvents.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No recognised plates yet.";
+    empty.textContent = "No vehicles seen yet.";
     list.appendChild(empty);
   }
+  fitHomeStream();
 }
 
 function updateTabletTimelineRelativeTimes() {
   const list = document.getElementById("tablet-timeline-list");
   if (!list) return;
   list.querySelectorAll("[data-tablet-relative]").forEach((node) => {
-    node.textContent = formatRelative(node.dataset.tabletRelative);
+    const elapsed = homeSeenAge(Number(node.dataset.tabletSeenAt));
+    node.textContent = elapsed === null ? formatRelative(node.dataset.tabletRelative) : formatRelativeDelta(elapsed);
   });
   list.querySelectorAll("[data-tablet-relative-dot]").forEach((dot) => {
-    const ageMinutes = getAgeMinutes(dot.dataset.tabletRelativeDot);
+    const elapsed = homeSeenAge(Number(dot.dataset.tabletSeenAt));
+    const ageMinutes = elapsed === null ? getAgeMinutes(dot.dataset.tabletRelativeDot) : Math.floor(elapsed / 60000);
     const isFresh = ageMinutes !== null && ageMinutes < 60;
     dot.classList.toggle("dot-fresh", isFresh);
     dot.classList.toggle("dot-stale", !isFresh);
@@ -1676,6 +2057,7 @@ async function initStream() {
   const frame = document.getElementById("stream-frame");
   const status = document.getElementById("stream-status");
   const fpsEl = document.getElementById("stream-fps");
+  const lagEl = document.getElementById("stream-lag");
   if (!frame) return;
   state.streamLoaded = true;
   if (status) status.textContent = "Loading stream...";
@@ -1700,6 +2082,7 @@ async function initStream() {
       if (fpsEl) {
         frame.appendChild(fpsEl);
       }
+      if (lagEl) frame.appendChild(lagEl);
       frame.appendChild(el);
       if (status) status.textContent = "Live";
       startStreamFps(el);
@@ -1734,6 +2117,7 @@ async function initStream() {
     if (fpsEl) {
       frame.appendChild(fpsEl);
     }
+    if (lagEl) frame.appendChild(lagEl);
     frame.appendChild(el);
     if (status) status.textContent = "Live";
     setupStreamFullscreen(frame, status, url);
@@ -1838,6 +2222,27 @@ function startStreamFps(el) {
   fpsEl.textContent = "FPS: --";
 }
 
+function pollVisibleTab(update, intervalMs, tab = "stream") {
+  let pending = false;
+  let timer = null;
+  const visible = () => !document.hidden && isTabActive(tab);
+  const poll = async () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (!visible() || pending) return;
+    pending = true;
+    try {
+      await update();
+    } finally {
+      pending = false;
+      if (visible()) timer = setTimeout(poll, intervalMs);
+    }
+  };
+  visibleTabPollers.push(poll);
+  document.addEventListener("visibilitychange", poll);
+  poll();
+}
+
 async function initStreamLag() {
   const lagEl = document.getElementById("stream-lag");
   if (!lagEl) return;
@@ -1845,7 +2250,7 @@ async function initStreamLag() {
     try {
       const resp = await fetch("/api/stream-lag");
       const data = await resp.json();
-      const lagMs = Number(data.lag_ms);
+      const lagMs = data.lag_ms;
       if (Number.isFinite(lagMs)) {
         lagEl.textContent = `Lag: ${(lagMs / 1000).toFixed(1)}s`;
       } else {
@@ -1855,8 +2260,7 @@ async function initStreamLag() {
       lagEl.textContent = "Lag: --";
     }
   };
-  update();
-  setInterval(update, 3000);
+  pollVisibleTab(update, 3000);
 }
 
 async function initStreamHealth() {
@@ -1902,8 +2306,7 @@ async function initStreamHealth() {
       }
     }
   };
-  update();
-  setInterval(update, 3000);
+  pollVisibleTab(update, 3000);
 }
 
 async function initSystemHealth() {
@@ -1939,8 +2342,7 @@ async function initSystemHealth() {
       systemEl.textContent = "System: --";
     }
   };
-  update();
-  setInterval(update, 5000);
+  pollVisibleTab(update, 5000);
 }
 
 function describeTimelineEvent(event) {
@@ -1993,17 +2395,19 @@ function updateTimelinePagination(meta) {
 async function fetchTimeline({ page = 1 } = {}) {
   const list = document.getElementById("timeline-list");
   const more = document.getElementById("timeline-more");
-  if (!list || state.loadingTimelineEvents) return;
+  if (!list) return;
+  const requestId = ++state.timelineRequest;
   state.loadingTimelineEvents = true;
   try {
-    state.timelinePage = page;
     const resp = await fetch(
-      `/api/timeline?page=${state.timelinePage}&per_page=${state.timelinePerPage}&window=${state.timelineWindow}`
+      `/api/timeline?page=${page}&per_page=${state.timelinePerPage}&window=${state.timelineWindow}`
     );
     if (!resp.ok) {
       throw new Error(`timeline ${resp.status}`);
     }
     const data = await resp.json();
+    if (requestId !== state.timelineRequest) return;
+    state.timelinePage = page;
     state.timelineEvents = Array.isArray(data.items) ? data.items : [];
     state.timelineTotal = Number(data.total || 0);
     state.timelineTotalPages = Number(data.total_pages || 1);
@@ -2015,11 +2419,11 @@ async function fetchTimeline({ page = 1 } = {}) {
         : "No timeline events in this window";
     }
   } catch (err) {
-    if (more) {
+    if (requestId === state.timelineRequest && more) {
       more.textContent = "Failed to load timeline";
     }
   } finally {
-    state.loadingTimelineEvents = false;
+    if (requestId === state.timelineRequest) state.loadingTimelineEvents = false;
   }
 }
 
@@ -2086,7 +2490,16 @@ async function initAdmin() {
   const savePlatesBtn = document.getElementById("save-plates");
   const platesList = document.getElementById("plates-list");
   setStatus("Loading...");
-  await loadAllowlist();
+  try {
+    await loadAllowlist();
+  } catch (err) {
+    setStatus("Could not load plates");
+    const feedback = document.getElementById("allowlist-status");
+    if (feedback) feedback.textContent = "Could not load the allowlist. Reload this page to try again.";
+    if (savePlatesBtn) savePlatesBtn.disabled = true;
+    if (addPlateBtn) addPlateBtn.disabled = true;
+    return;
+  }
   if (Array.isArray(state.plates) && state.plates.length && Array.isArray(state.plates[0])) {
     const grouped = {};
     state.plates.forEach(([plate, owner]) => {
@@ -2096,10 +2509,13 @@ async function initAdmin() {
     state.plates = Object.values(grouped);
   }
   renderAllowlist();
+  state.platesSavedSnapshot = JSON.stringify(state.plates);
+  updateAllowlistFeedback();
   setStatus("Ready");
   addPlateBtn.addEventListener("click", () => {
     state.plates.push({ owner: "", plates: [] });
     renderAllowlist();
+    markAllowlistChanged();
     if (!platesList) return;
     const rows = platesList.querySelectorAll(".plate-row");
     const last = rows[rows.length - 1];
@@ -2141,325 +2557,220 @@ function formatProcessingTime(ms) {
   return `${Math.round(ms)}ms`;
 }
 
-async function initStats() {
-  const chips = document.querySelectorAll("#tab-stats .chip");
-  const totalEl = document.getElementById("stat-total");
-  const recEl = document.getElementById("stat-recognised");
-  const unmatchEl = document.getElementById("stat-unmatched");
-  const hitRateEl = document.getElementById("stat-hit-rate");
-  const processingEl = document.getElementById("stat-processing");
-  const gateOpensEl = document.getElementById("stat-gate-opens");
-  const manualOpensEl = document.getElementById("stat-manual-opens");
-  const insightLabel = document.getElementById("insight-label");
-  const topPlateEl = document.getElementById("insight-top-plate");
-  const topPlateMetaEl = document.getElementById("insight-top-plate-meta");
-  const topUnmatchedEl = document.getElementById("insight-top-unmatched");
-  const topUnmatchedMetaEl = document.getElementById("insight-top-unmatched-meta");
-  const busiestEl = document.getElementById("insight-busiest");
-  const busiestMetaEl = document.getElementById("insight-busiest-meta");
-  const noPlateEl = document.getElementById("insight-no-plate");
-  const noPlateMetaEl = document.getElementById("insight-no-plate-meta");
-  const topManualIpEl = document.getElementById("insight-top-manual-ip");
-  const topManualIpMetaEl = document.getElementById("insight-top-manual-ip-meta");
-  const lastOpenEl = document.getElementById("insight-last-open");
-  const lastOpenMetaEl = document.getElementById("insight-last-open-meta");
-  const healthDiskEl = document.getElementById("health-disk-free");
-  const healthDiskMetaEl = document.getElementById("health-disk-meta");
-  const healthTempEl = document.getElementById("health-temp");
-  const healthTempMetaEl = document.getElementById("health-temp-meta");
-  const healthMaintenanceEl = document.getElementById("health-maintenance");
-  const healthMaintenanceMetaEl = document.getElementById("health-maintenance-meta");
-  const healthFailuresEl = document.getElementById("health-failures");
-  const healthFailuresMetaEl = document.getElementById("health-failures-meta");
-  const chart = document.getElementById("stats-chart");
-  const chartLabel = document.getElementById("chart-label");
-  const donutEl = document.getElementById("stats-donut");
-  const donutLegend = document.getElementById("stats-donut-legend");
-  const cloudRecognised = document.getElementById("cloud-recognised");
-  const cloudUnmatched = document.getElementById("cloud-unmatched");
-  if (!chart) return;
-  const ctx = chart.getContext("2d");
-  state.statsLoaded = true;
-
-  const renderChart = (series, label) => {
-    ctx.clearRect(0, 0, chart.width, chart.height);
-    if (!series.length) {
-      chartLabel.textContent = "No data yet.";
-      return;
-    }
-    chartLabel.textContent = label;
-    const values = series.map((p) => p.v);
-    const max = Math.max(...values, 1);
-    const padding = 24;
-    const width = chart.width - padding * 2;
-    const height = chart.height - padding * 2;
-    const step = series.length > 1 ? width / (series.length - 1) : width;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#15a05f";
-    ctx.beginPath();
-    series.forEach((point, idx) => {
-      const x = padding + idx * step;
-      const y = chart.height - padding - (point.v / max) * height;
-      if (idx === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    });
-    ctx.stroke();
-    ctx.lineTo(padding + (series.length - 1) * step, chart.height - padding);
-    ctx.lineTo(padding, chart.height - padding);
-    ctx.closePath();
-    const gradient = ctx.createLinearGradient(0, padding, 0, chart.height - padding);
-    gradient.addColorStop(0, "rgba(21, 160, 95, 0.35)");
-    gradient.addColorStop(1, "rgba(21, 160, 95, 0.02)");
-    ctx.fillStyle = gradient;
-    ctx.fill();
-    ctx.fillStyle = "#0b6a3b";
-    series.forEach((point, idx) => {
-      const x = padding + idx * step;
-      const y = chart.height - padding - (point.v / max) * height;
-      ctx.beginPath();
-      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    });
-  };
-
-  const renderDonut = (recognised, unmatched) => {
-    if (!donutEl || !donutLegend) return;
-    const total = recognised + unmatched;
-    const ratio = total ? Math.round((recognised / total) * 100) : 0;
-    const deg = (ratio / 100) * 360;
-    donutEl.style.background = `conic-gradient(var(--accent) 0deg ${deg}deg, rgba(31, 27, 22, 0.15) ${deg}deg 360deg)`;
-    donutLegend.textContent = total
-      ? `${ratio}% recognised • ${100 - ratio}% unmatched`
-      : "--";
-  };
-
-  const renderCloud = (el, items) => {
-    if (!el) return;
-    el.innerHTML = "";
-    if (!items || !items.length) {
-      el.textContent = "No data yet.";
-      return;
-    }
-    const max = Math.max(...items.map((i) => i.count || 0), 1);
-    items.forEach((item) => {
-      const word = document.createElement("span");
-      word.className = "word";
-      const size = 12 + Math.round((item.count / max) * 16);
-      word.style.fontSize = `${size}px`;
-      word.textContent = item.plate || "UNKNOWN";
-      el.appendChild(word);
-    });
-  };
-
-  const formatBytes = (value) => {
-    if (!Number.isFinite(value) || value < 0) return "--";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let size = value;
-    let unit = 0;
-    while (size >= 1024 && unit < units.length - 1) {
-      size /= 1024;
-      unit += 1;
-    }
-    return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
-  };
-
-  const loadStats = async (windowKey) => {
-    setStatus("Loading stats...");
-    const [statsRes, insightsRes, healthRes] = await Promise.all([
-      fetch(`/api/stats?window=${windowKey}`),
-      fetch(`/api/stats/insights?window=${windowKey}`),
-      fetch("/api/service-health"),
-    ]);
-    const data = await statsRes.json();
-    const insightsData = await insightsRes.json();
-    const healthData = await healthRes.json();
-    totalEl.textContent = coalesce(data.total, "--");
-    const recognisedCount = Number(data.counts.recognised || 0);
-    const unmatchedCount = Number(data.counts.unmatched || 0) + Number(data.counts.candidate || 0);
-    const manualOpenCount = Number(data.counts.manual_open || 0);
-    recEl.textContent = recognisedCount;
-    unmatchEl.textContent = unmatchedCount;
-    if (gateOpensEl) gateOpensEl.textContent = Number(data.gate_opens || 0);
-    if (manualOpensEl) manualOpensEl.textContent = manualOpenCount;
-    const total = Number(data.total || 0);
-    const recognised = Number(data.counts.recognised || 0);
-    const anprTotal = recognisedCount + unmatchedCount;
-    if (hitRateEl) {
-      hitRateEl.textContent = anprTotal ? `${((recognised / anprTotal) * 100).toFixed(1)}%` : "--";
-    }
-    const insights = insightsData && insightsData.insights ? insightsData.insights : {};
-    const avgProcessing = insights.avg_processing_ms
-      ? insights.avg_processing_ms.overall
-      : undefined;
-    if (processingEl) {
-      processingEl.textContent = Number.isFinite(avgProcessing)
-        ? formatProcessingTime(avgProcessing)
-        : "--";
-    }
-    const label = data.timeseries.bucket === "hour" ? "Hourly activity" : "Daily activity";
-    renderChart(data.timeseries.series, label);
-    if (insightLabel) {
-      insightLabel.textContent = `Window: ${windowKey}`;
-    }
-    if (topPlateEl && topPlateMetaEl) {
-      const topRecognised = insights.top_recognised || {};
-      const plate = topRecognised.plate;
-      const count = topRecognised.count || 0;
-      topPlateEl.textContent = plate && plate !== "UNKNOWN" ? plate : "--";
-      topPlateMetaEl.textContent = count ? `${count} hits` : "No recognised plates";
-    }
-    if (topUnmatchedEl && topUnmatchedMetaEl) {
-      const topUnmatched = insights.top_unmatched || {};
-      const plate = topUnmatched.plate;
-      const count = topUnmatched.count || 0;
-      topUnmatchedEl.textContent = plate && plate !== "UNKNOWN" ? plate : "--";
-      topUnmatchedMetaEl.textContent = count ? `${count} unmatched reads` : "No unmatched reads";
-    }
-    if (busiestEl && busiestMetaEl) {
-      const busiest = insights.busiest_bucket || {};
-      const bucket = busiest.bucket;
-      const count = busiest.count || 0;
-      const bucketType = busiest.bucket_type === "hour" ? "Busiest hour" : "Busiest day";
-      busiestEl.textContent = bucket || "--";
-      busiestMetaEl.textContent = count ? `${bucketType}: ${count} events` : "No activity";
-    }
-    if (noPlateEl && noPlateMetaEl) {
-      const noPlate = Number(insights.no_plate || 0);
-      noPlateEl.textContent = Number.isFinite(noPlate) ? String(noPlate) : "--";
-      noPlateMetaEl.textContent = anprTotal
-        ? `${((noPlate / anprTotal) * 100).toFixed(1)}% of ANPR reads`
-        : "--";
-    }
-    if (topManualIpEl && topManualIpMetaEl) {
-      const topManual = (insights.top_manual_ips || [])[0] || {};
-      topManualIpEl.textContent = topManual.request_ip || "--";
-      topManualIpMetaEl.textContent = topManual.count ? `${topManual.count} manual opens` : "No manual opens";
-    }
-    if (lastOpenEl && lastOpenMetaEl) {
-      const latestOpen = insights.latest_gate_open || {};
-      lastOpenEl.textContent = latestOpen.captured_at
-        ? formatDayTimeLabel(latestOpen.captured_at)
-        : "--";
-      if (latestOpen.kind === "manual_open") {
-        lastOpenMetaEl.textContent = latestOpen.request_ip
-          ? `Manual open from ${latestOpen.request_ip}`
-          : "Manual open";
-      } else if (latestOpen.captured_at) {
-        lastOpenMetaEl.textContent = `${latestOpen.kind || "gate open"} • ${formatRelative(latestOpen.captured_at)}`;
-      } else {
-        lastOpenMetaEl.textContent = "No gate opens";
-      }
-    }
-    if (healthDiskEl && healthDiskMetaEl) {
-      const disk = healthData.disk || {};
-      healthDiskEl.textContent = Number.isFinite(disk.free_pct) ? `${disk.free_pct.toFixed(1)}%` : "--";
-      healthDiskMetaEl.textContent = Number.isFinite(disk.free_bytes)
-        ? `${formatBytes(disk.free_bytes)} free`
-        : "--";
-    }
-    if (healthTempEl && healthTempMetaEl) {
-      healthTempEl.textContent = Number.isFinite(healthData.temperature_c)
-        ? `${healthData.temperature_c.toFixed(1)}C`
-        : "--";
-      const services = healthData.services || {};
-      healthTempMetaEl.textContent = `web:${services.gate_anpr_web || "?"} worker:${services.gate_anpr || "?"} alprd:${services.alprd || "?"}`;
-    }
-    if (healthMaintenanceEl && healthMaintenanceMetaEl) {
-      const maintenance = healthData.maintenance || {};
-      healthMaintenanceEl.textContent = maintenance.last_success
-        ? maintenance.stale
-          ? "Stale"
-          : "OK"
-        : "--";
-      if (maintenance.last_success) {
-        const age = Number.isFinite(maintenance.age_hours) ? `${maintenance.age_hours}h ago` : maintenance.last_success;
-        healthMaintenanceMetaEl.textContent = `Last prune ${age}`;
-      } else {
-        healthMaintenanceMetaEl.textContent = maintenance.last_error || "No successful maintenance run";
-      }
-    }
-    if (healthFailuresEl && healthFailuresMetaEl) {
-      const failed = Array.isArray(healthData.failed_units) ? healthData.failed_units : [];
-      healthFailuresEl.textContent = String(failed.length);
-      healthFailuresMetaEl.textContent = failed.length ? failed.join(", ") : "No failed units";
-    }
-    renderDonut(recognisedCount, unmatchedCount);
-    renderCloud(cloudRecognised, insights.top_recognised_list || []);
-    renderCloud(cloudUnmatched, insights.top_unmatched_list || []);
-    updateStatusTimestamp();
-    state.timelineWindow = windowKey === "24h" ? "7d" : windowKey;
-  };
-
-  chips.forEach((chip) => {
-    chip.addEventListener("click", () => {
-      chips.forEach((btn) => btn.classList.remove("active"));
-      chip.classList.add("active");
-      loadStats(chip.dataset.window);
-    });
-  });
-
-  const topPlateCard = document.getElementById("insight-top-plate-card");
-  if (topPlateCard) {
-    topPlateCard.addEventListener("click", () => {
-      setActiveTab("candidates");
-      setKindFilters(["recognised"]);
-    });
-  }
-  const topUnmatchedCard = document.getElementById("insight-top-unmatched-card");
-  if (topUnmatchedCard) {
-    topUnmatchedCard.addEventListener("click", () => {
-      setActiveTab("candidates");
-      setKindFilters(["unmatched"]);
-    });
-  }
-  const busiestCard = document.getElementById("insight-busiest-card");
-  if (busiestCard) {
-    busiestCard.addEventListener("click", () => {
-      setActiveTab("timeline");
-      fetchTimeline({ page: 1 });
-    });
-  }
-
-  const resizeCanvas = () => {
-    const parent = chart.parentElement;
-    const containerWidth = parent && parent.clientWidth ? parent.clientWidth : 600;
-    chart.width = Math.max(240, containerWidth - 16);
-    chart.height = 220;
-  };
-  resizeCanvas();
-  window.addEventListener("resize", () => {
-    resizeCanvas();
-    const active = document.querySelector("#tab-stats .chip.active");
-    if (active) {
-      loadStats(active.dataset.window);
-    }
-  });
-
-  loadStats("24h");
-
-  chart.addEventListener("click", (event) => {
-    const rect = chart.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const containerWidth = chart.width;
-    const padding = 24;
-    const active = document.querySelector("#tab-stats .chip.active");
-    if (!active) return;
-    fetch(`/api/stats?window=${active.dataset.window}`)
-      .then((resp) => resp.json())
-      .then((data) => {
-        const series = data.timeseries.series || [];
-        if (!series.length) return;
-        const barWidth = (containerWidth - padding * 2) / series.length;
-        const index = Math.floor((x - padding) / barWidth);
-        if (index < 0 || index >= series.length) return;
-        setActiveTab("timeline");
-      })
-      .catch(() => {});
-  });
+function statsCivilTime(value) {
+  // Treat Pi-local labels as civil time, independent of the screen's timezone.
+  const parts = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+  return parts ? Date.UTC(+parts[1], +parts[2] - 1, +parts[3], +(parts[4] || 0), +(parts[5] || 0)) : NaN;
 }
+
+function statsChartBuckets(timeseries) {
+  const series = (timeseries && timeseries.series || []).filter((point) =>
+    Number.isFinite(statsCivilTime(point.t)) && Number.isFinite(point.v) && point.v >= 0);
+  const unit = timeseries && timeseries.bucket === "hour" ? 3600000 : 86400000;
+  let start = statsCivilTime(timeseries && timeseries.start);
+  let end = statsCivilTime(timeseries && timeseries.end);
+  if (!Number.isFinite(start)) start = series.length ? Math.min(...series.map((p) => statsCivilTime(p.t))) : end;
+  if (!Number.isFinite(end)) end = series.length ? Math.max(...series.map((p) => statsCivilTime(p.t))) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  start = Math.floor(start / unit) * unit;
+  end = Math.floor(end / unit) * unit;
+  // Bound DOM work even for years of retained data. Longer spans aggregate
+  // adjacent civil-time buckets; they never discard the quiet periods.
+  const span = Math.floor((end - start) / unit) + 1;
+  const group = Math.max(1, Math.ceil(span / 60));
+  const width = group * unit;
+  const points = [];
+  for (let t = start; t <= end; t += width) points.push({ time: t, end: Math.min(t + width - unit, end), value: 0, unit });
+  series.forEach((point) => {
+    const index = Math.floor((statsCivilTime(point.t) - start) / width);
+    if (index >= 0 && index < points.length) points[index].value += point.v;
+  });
+  return points;
+}
+
+function statsBucketLabel(point, compact = false) {
+  const format = (value) => {
+    const date = new Date(value);
+    const day = `${date.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getUTCMonth()]}`;
+    return point.unit === 3600000 ? `${compact ? "" : day + ", "}${String(date.getUTCHours()).padStart(2, "0")}:00` : day;
+  };
+  return point.end === point.time ? format(point.time) : `${format(point.time)}–${format(point.end)}`;
+}
+
+async function initStats() {
+  const chart = document.getElementById("stats-chart");
+  if (!chart) return;
+  state.statsLoaded = true;
+  const chips = document.querySelectorAll("#tab-stats .chip");
+  let requestId = 0;
+  let chartPoints = [];
+  let lastTimeseries = null;
+  let loadedWindow = null;
+  const text = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  const periods = { "24h": "the last 24 hours", "7d": "the last 7 days", "30d": "the last 30 days", all: "retained history" };
+  const error = (message) => {
+    const el = document.getElementById("stats-error");
+    if (el) { el.hidden = !message; el.textContent = message; }
+  };
+  const renderChart = (timeseries) => {
+    lastTimeseries = timeseries;
+    chartPoints = statsChartBuckets(timeseries);
+    const max = Math.max(1, ...chartPoints.map((p) => p.value));
+    const ceiling = Math.max(2, Math.ceil(max / 2) * 2);
+    const width = Math.max(300, Math.min(900, chart.clientWidth || window.innerWidth || 800));
+    chart.setAttribute("viewBox", `0 0 ${width} 240`);
+    const left = 36, right = width - 18, top = 18, bottom = 198;
+    const step = (right - left) / Math.max(chartPoints.length, 1);
+    let markup = `<title>Recorded activity by time, including manual commands</title>`;
+    [0, ceiling / 2, ceiling].forEach((value) => {
+      const y = bottom - value / ceiling * (bottom - top);
+      markup += `<line class="stats-gridline" x1="${left}" y1="${y}" x2="${right}" y2="${y}" />`;
+      markup += `<text class="stats-axis" x="${left - 10}" y="${y + 4}" text-anchor="end">${value}</text>`;
+    });
+    chartPoints.forEach((point, index) => {
+      const height = point.value ? point.value / ceiling * (bottom - top) : 2;
+      const label = `${statsBucketLabel(point)}: ${point.value} recorded ${point.value === 1 ? "event" : "events"}`;
+      markup += `<rect data-index="${index}" tabindex="0" role="button" aria-label="${escapeHtml(label)}" class="stats-bar${point.value ? "" : " stats-bar-empty"}" x="${left + index * step + step * .12}" y="${bottom - height}" width="${Math.max(1, step * .76)}" height="${height}" rx="2"><title>${escapeHtml(label)}</title></rect>`;
+      const labelEvery = Math.max(1, Math.ceil(chartPoints.length / (width < 480 ? 3 : 5)));
+      if (index % labelEvery === 0 || index === chartPoints.length - 1 && index % labelEvery > 1) {
+        const anchor = index === 0 ? "start" : index === chartPoints.length - 1 ? "end" : "middle";
+        markup += `<text class="stats-axis" x="${left + index * step + step / 2}" y="224" text-anchor="${anchor}">${escapeHtml(statsBucketLabel(point, true))}</text>`;
+      }
+    });
+    chart.innerHTML = markup;
+    const populated = chartPoints.some((point) => point.value > 0);
+    const label = timeseries && timeseries.bucket === "hour" ? "Hourly" : "Daily";
+    const grouped = chartPoints.length && chartPoints[0].end !== chartPoints[0].time;
+    text("chart-label", `${grouped ? "Grouped daily" : label} records · Pi local time`);
+    text("stats-chart-reading", populated ? "Select a bar for its count. Includes manual commands." : "No recorded activity in this period.");
+  };
+  const renderRanking = (id, items, empty) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const rows = (Array.isArray(items) ? items : []).slice(0, 8);
+    const maximum = Math.max(1, ...rows.map((item) => Number(item.count) || 0));
+    el.innerHTML = rows.length ? rows.map((item) => {
+      const count = Math.max(0, Number(item.count) || 0);
+      const plate = item.plate && item.plate !== "UNKNOWN" ? item.plate : "Unreadable";
+      return `<div class="stats-ranking-row"><span class="stats-registration">${escapeHtml(plate)}</span><span class="stats-track" aria-hidden="true"><span style="width:${count / maximum * 100}%"></span></span><span class="stats-count">${count}</span></div>`;
+    }).join("") : `<div class="stats-empty">${escapeHtml(empty)}</div>`;
+  };
+  const renderHealth = (data) => {
+    if (!data) {
+      text("stats-health-summary", "Status unavailable");
+      ["health-temp", "health-disk-free", "health-maintenance", "health-failures"].forEach((id) => text(id, "—"));
+      ["health-temp-meta", "health-disk-meta", "health-maintenance-meta", "health-failures-meta"].forEach((id) => text(id, "Status unavailable"));
+      return;
+    }
+    const disk = data.disk || {}, maintenance = data.maintenance || {};
+    const failed = Array.isArray(data.failed_units) ? data.failed_units : [];
+    const temp = Number.isFinite(data.temperature_c) ? `${data.temperature_c.toFixed(1)}°C` : "Unavailable";
+    text("health-temp", temp);
+    const services = data.services || {};
+    const active = ["gate_anpr_web", "gate_anpr", "alprd", "stream_jpeg"].every((name) => services[name] === "active");
+    text("health-temp-meta", active ? "Services active; progress is not measured" : "One or more services inactive or unknown");
+    text("health-disk-free", Number.isFinite(disk.free_pct) ? `${disk.free_pct.toFixed(0)}% free` : "Unavailable");
+    text("health-disk-meta", Number.isFinite(disk.free_bytes) ? `${(disk.free_bytes / 1073741824).toFixed(1)} GB available` : "Disk status unavailable");
+    text("health-maintenance", maintenance.last_success ? maintenance.stale ? "Overdue" : "Up to date" : "Unknown");
+    text("health-maintenance-meta", maintenance.last_success ? `Last cleanup ${Number.isFinite(maintenance.age_hours) ? maintenance.age_hours + "h ago" : maintenance.last_success}` : "No successful cleanup recorded");
+    text("health-failures", String(failed.length));
+    text("health-failures-meta", failed.length ? failed.join(", ") : "No failed services reported");
+    text("stats-health-summary", `${temp} · ${failed.length ? failed.length + " failed services" : active ? "Services active" : "Check services"}`);
+  };
+  const loadStats = async (windowKey) => {
+    const current = ++requestId;
+    error("");
+    text("stats-summary", `Loading ${periods[windowKey] || "activity"}…`);
+    // Remove prior-period values immediately: a failed new request must not
+    // leave yesterday's totals looking like this month's data.
+    ["stat-total", "stat-recognised", "stat-unmatched", "stat-manual-opens", "stat-processing", "insight-no-plate"].forEach((id) => text(id, "—"));
+    text("insight-no-plate-meta", "");
+    chartPoints = [];
+    lastTimeseries = null;
+    chart.innerHTML = "";
+    text("chart-label", "Loading activity…");
+    text("stats-chart-reading", "");
+    renderRanking("stats-recognised-list", [], "Loading…");
+    renderRanking("stats-unmatched-list", [], "Loading…");
+    const health = fetchJsonWithDeadline("/api/service-health").then((response) => {
+      if (current === requestId) renderHealth(response.ok ? response.data : null);
+    }).catch(() => { if (current === requestId) renderHealth(null); });
+    try {
+      const responses = await Promise.all([
+        fetchJsonWithDeadline(`/api/stats?window=${encodeURIComponent(windowKey)}`),
+        fetchJsonWithDeadline(`/api/stats/insights?window=${encodeURIComponent(windowKey)}`),
+      ]);
+      if (current !== requestId) return;
+      if (!responses.every((response) => response.ok)) throw new Error("Statistics unavailable");
+      const data = responses[0].data, insightData = responses[1].data;
+      if (!data || !data.counts || !data.timeseries || !insightData || !insightData.insights) throw new Error("Invalid statistics");
+      const insights = insightData.insights;
+      const rec = Number(data.counts.recognised || 0);
+      const unmatched = Number(data.counts.unmatched || 0) + Number(data.counts.candidate || 0);
+      const manual = Number(data.counts.manual_open || 0);
+      text("stat-total", rec + unmatched);
+      text("stat-recognised", rec);
+      text("stat-unmatched", unmatched);
+      text("stat-manual-opens", manual);
+      text("stats-summary", rec + unmatched || manual
+        ? `${rec} recognised detections, ${unmatched} unmatched captures and ${manual} manual commands in ${periods[windowKey]}.`
+        : `No recorded activity in ${periods[windowKey]}. New captures will appear here.`);
+      const processing = insights.avg_processing_ms && insights.avg_processing_ms.overall;
+      text("stat-processing", Number.isFinite(processing) ? formatProcessingTime(processing) : "Unavailable");
+      text("insight-no-plate", Number(insights.no_plate || 0));
+      text("insight-no-plate-meta", "No registration returned; not an accuracy score");
+      renderChart(data.timeseries);
+      renderRanking("stats-recognised-list", insights.top_recognised_list, "No recognised detections in this period.");
+      renderRanking("stats-unmatched-list", insights.top_unmatched_list, "No unmatched captures in this period.");
+      loadedWindow = windowKey;
+      updateStatusTimestamp();
+    } catch (err) {
+      if (current !== requestId) return;
+      text("stats-summary", "Activity could not be loaded.");
+      text("chart-label", "Activity unavailable");
+      error("Could not load this period. Select it again to retry; no gate controls are affected.");
+      renderRanking("stats-recognised-list", [], "Activity unavailable.");
+      renderRanking("stats-unmatched-list", [], "Activity unavailable.");
+    }
+    // Health is independent; an unavailable maintenance check must not hide
+    // already loaded activity, and its deadline cannot lock the whole page.
+    await health;
+  };
+  chips.forEach((chip) => chip.addEventListener("click", () => {
+    chips.forEach((button) => { button.classList.remove("active"); button.setAttribute("aria-pressed", "false"); });
+    chip.classList.add("active");
+    chip.setAttribute("aria-pressed", "true");
+    loadStats(chip.dataset.window);
+  }));
+  [["insight-top-plate-card", "recognised"], ["insight-top-unmatched-card", "unmatched"]].forEach(([id, kind]) => {
+    const card = document.getElementById(id);
+    if (card) card.addEventListener("click", () => {
+      if (loadedWindow) {
+        state.eventsWindow = loadedWindow;
+        const selector = document.getElementById("history-window");
+        if (selector) selector.value = loadedWindow;
+      }
+      showHistoryForKinds([kind]);
+    });
+  });
+  const readBar = (event) => {
+    if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+    const target = event.target.closest ? event.target.closest("[data-index]") : null;
+    if (!target) return;
+    const point = chartPoints[Number(target.getAttribute("data-index"))];
+    if (point) {
+      if (event.type === "keydown") event.preventDefault();
+      text("stats-chart-reading", `${statsBucketLabel(point)} · ${point.value} recorded ${point.value === 1 ? "event" : "events"}`);
+    }
+  };
+  chart.addEventListener("click", readBar);
+  chart.addEventListener("keydown", readBar);
+  window.addEventListener("resize", () => {
+    if (lastTimeseries && isTabActive("stats")) renderChart(lastTimeseries);
+  });
+  loadStats("24h");
+}
+
 
 initTheme();
 if (isAdmin) {

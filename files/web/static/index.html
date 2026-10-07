@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Gate ANPR" />
@@ -11,8 +11,9 @@
     <link rel="manifest" href="/static/manifest.json" />
     <title>Gate ANPR</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="stats.css" />
   </head>
-  <body class="main-page">
+  <body class="main-page home-active">
     <header class="topbar">
       <div class="topbar-left">
         <button class="brand tab brand-tab" data-tab="home" aria-label="Gate ANPR home">
@@ -50,11 +51,15 @@
           <div class="card tablet-stream">
             <div class="card-head">
               <h2>Live view</h2>
-              <div class="stream-head-right">
-                <div class="live-badge" aria-live="polite">
-                  <span class="dot dot-live"></span>
-                  Live
-                </div>
+              <div class="stream-head-right home-health" aria-label="Camera and service status">
+                <details class="home-health-details">
+                  <summary aria-label="View status details">
+                    <span id="tablet-stream-status" class="live-badge status-unknown">Checking view…</span>
+                  </summary>
+                  <div id="tablet-system-status" class="home-system-status">Checking services…</div>
+                </details>
+                <span id="tablet-source-status" class="live-badge status-unknown">Source checking</span>
+                <span id="tablet-service-status" class="live-badge status-unknown">Services checking</span>
               </div>
             </div>
             <div class="tablet-stream-frame" id="tablet-stream-frame"></div>
@@ -64,7 +69,7 @@
             <div class="card-head">
               <h2>Gate control</h2>
             </div>
-            <button id="open-gate-tablet" class="gate-button">Open the gate</button>
+            <button id="open-gate-tablet" class="gate-button">Open Sesame!</button>
             <div id="tablet-gate-status" class="gate-status gate-status--ready">
               Gate ready
             </div>
@@ -73,11 +78,18 @@
 
           <div class="card tablet-timeline">
             <div class="card-head">
-              <h2>Latest recognised</h2>
-              <div class="legend">Last 2 detections</div>
+              <h2>Latest seen</h2>
             </div>
             <div id="tablet-timeline-list" class="tablet-timeline-list"></div>
+            <div id="home-arrival-status" class="meta" hidden></div>
           </div>
+
+          <section class="home-metrics" aria-label="Pi and latest sighting metrics">
+            <div class="home-metric"><span class="home-metric-label">CPU temp</span><strong id="home-cpu-temp">—</strong></div>
+            <div class="home-metric"><span class="home-metric-label">Last processing</span><strong id="home-processing">—</strong></div>
+            <div class="home-metric"><span class="home-metric-label">Last OCR score</span><strong id="home-confidence">—</strong></div>
+            <div class="home-metric"><span class="home-metric-label">Disk free</span><strong id="home-disk-free">—</strong></div>
+          </section>
         </div>
       </section>
 
@@ -102,10 +114,24 @@
           <p class="legend">
             Recognised = allowlist match. Unmatched = capture with no allowlist hit.
             Events are grouped into 60s
-            windows so a single vehicle shows together.
+            windows within each page. Tap a capture to open the full-size image.
           </p>
+          <div id="history-controls" class="history-controls">
+            <label for="history-window">Show captures from</label>
+            <select id="history-window">
+              <option value="24h">Last 24 hours</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d" selected>Last 30 days</option>
+              <option value="all">All retained history</option>
+            </select>
+            <button id="history-refresh" class="btn btn-ghost" type="button">Latest captures</button>
+          </div>
           <div id="events-list" class="feed"></div>
-          <div id="events-more" class="feed-status">Scroll for more</div>
+          <nav class="history-pagination" aria-label="History pages">
+            <button id="history-prev" class="btn btn-secondary" type="button" disabled>Newer</button>
+            <div id="events-more" class="feed-status" aria-live="polite">Loading history…</div>
+            <button id="history-next" class="btn btn-secondary" type="button" disabled>Older</button>
+          </nav>
         </div>
       </section>
 
@@ -156,145 +182,46 @@
       </section>
 
       <section id="tab-stats" class="tab-panel" role="tabpanel" aria-hidden="true">
-        <section class="card">
+        <section class="card stats-overview">
           <div class="card-head">
-            <h2>Summary</h2>
-            <div class="filters">
-              <button class="chip active" data-window="24h">24h</button>
+            <div><div class="stats-eyebrow">Around the gate</div><h2>Activity at a glance</h2></div>
+            <div class="filters stats-periods" aria-label="Statistics period">
+              <button class="chip active" data-window="24h">24 hours</button>
               <button class="chip" data-window="7d">7 days</button>
               <button class="chip" data-window="30d">30 days</button>
-              <button class="chip" data-window="all">Forever</button>
+              <button class="chip" data-window="all">All history</button>
             </div>
           </div>
-          <div class="stat-grid">
-            <div class="stat">
-              <div class="stat-label">Total Events</div>
-              <div id="stat-total" class="stat-value">--</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Recognised</div>
-              <div id="stat-recognised" class="stat-value">--</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Unmatched</div>
-              <div id="stat-unmatched" class="stat-value">--</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Allowlist Hit Rate</div>
-              <div id="stat-hit-rate" class="stat-value">--</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Avg Processing</div>
-              <div id="stat-processing" class="stat-value">--</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Gate Opens</div>
-              <div id="stat-gate-opens" class="stat-value">--</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Manual Opens</div>
-              <div id="stat-manual-opens" class="stat-value">--</div>
-            </div>
-            <div class="stat stat-donut">
-              <div class="stat-label">Recognised vs Unmatched</div>
-              <div id="stats-donut" class="donut"></div>
-              <div id="stats-donut-legend" class="donut-legend">--</div>
-            </div>
+          <p id="stats-summary" class="stats-summary">Loading recorded activity…</p>
+          <div id="stats-error" class="stats-error" role="status" hidden></div>
+          <div class="stats-key-metrics">
+            <div class="stats-metric"><span>Recorded detections</span><strong id="stat-total">—</strong><small>ANPR captures after duplicate filtering</small></div>
+            <button class="stats-metric" id="insight-top-plate-card" type="button"><span><i class="stats-dot matched"></i>Recognised</span><strong id="stat-recognised">—</strong><small>Allowlist matches · view history ↗</small></button>
+            <button class="stats-metric" id="insight-top-unmatched-card" type="button"><span><i class="stats-dot unmatched"></i>Unmatched</span><strong id="stat-unmatched">—</strong><small>Unfamiliar or unreadable · view history ↗</small></button>
+            <div class="stats-metric"><span>Manual commands</span><strong id="stat-manual-opens">—</strong><small>Recorded button requests</small></div>
           </div>
+          <div class="stats-chart-heading"><h3>When activity happened</h3><span id="chart-label" class="chart-label">Recorded events, including manual commands</span></div>
+          <svg id="stats-chart" viewBox="0 0 800 240" role="group" aria-label="Recorded activity by time"></svg>
+          <div id="stats-chart-reading" class="stats-chart-reading" aria-live="polite">Select a bar for its count.</div>
+          <details class="stats-notes"><summary>What these counts mean</summary><p class="stats-footnote">Counts are recorded events, not confirmed visits or physical gate movements. Quiet periods mean no stored events; they do not prove the camera was online.</p></details>
         </section>
 
-        <section class="card">
-          <div class="card-head">
-            <h2>Insights</h2>
-            <div id="insight-label" class="chart-label">Loading…</div>
-          </div>
-          <div class="insight-grid">
-            <button class="insight" id="insight-top-plate-card" type="button">
-              <div class="insight-title">Most popular reg</div>
-              <div id="insight-top-plate" class="insight-value">--</div>
-              <div id="insight-top-plate-meta" class="insight-sub">--</div>
-            </button>
-            <button class="insight" id="insight-top-unmatched-card" type="button">
-              <div class="insight-title">Most common miss</div>
-              <div id="insight-top-unmatched" class="insight-value">--</div>
-              <div id="insight-top-unmatched-meta" class="insight-sub">--</div>
-            </button>
-            <button class="insight" id="insight-busiest-card" type="button">
-              <div class="insight-title">Peak activity</div>
-              <div id="insight-busiest" class="insight-value">--</div>
-              <div id="insight-busiest-meta" class="insight-sub">--</div>
-            </button>
-            <div class="insight">
-              <div class="insight-title">No-plate captures</div>
-              <div id="insight-no-plate" class="insight-value">--</div>
-              <div id="insight-no-plate-meta" class="insight-sub">--</div>
-            </div>
-            <div class="insight">
-              <div class="insight-title">Top manual IP</div>
-              <div id="insight-top-manual-ip" class="insight-value">--</div>
-              <div id="insight-top-manual-ip-meta" class="insight-sub">--</div>
-            </div>
-            <div class="insight">
-              <div class="insight-title">Last gate open</div>
-              <div id="insight-last-open" class="insight-value">--</div>
-              <div id="insight-last-open-meta" class="insight-sub">--</div>
-            </div>
-          </div>
-        </section>
+        <div class="stats-ranking-grid">
+          <section class="card"><div class="card-head"><div><div class="stats-eyebrow">Recognised activity</div><h2>Most seen registrations</h2></div><span class="stats-table-unit">Captures</span></div><div id="stats-recognised-list" class="stats-ranking"></div></section>
+          <section class="card"><div class="card-head"><div><div class="stats-eyebrow">Worth a look</div><h2>Unmatched reads</h2></div><span class="stats-table-unit">Captures</span></div><p class="stats-footnote">These may be visitors or reading errors. Review the image before changing access.</p><div id="stats-unmatched-list" class="stats-ranking"></div></section>
+        </div>
 
-        <section class="card">
-          <div class="card-head">
-            <h2>System health</h2>
-            <div class="chart-label">Live Pi and maintenance status.</div>
+        <details class="card stats-health">
+          <summary><span>System &amp; reading details</span><span id="stats-health-summary" class="stats-health-summary">Checking…</span></summary>
+          <div class="stats-health-grid">
+            <div><span>Pi temperature</span><strong id="health-temp">—</strong><small id="health-temp-meta">—</small></div>
+            <div><span>Disk space</span><strong id="health-disk-free">—</strong><small id="health-disk-meta">—</small></div>
+            <div><span>Mean processing time</span><strong id="stat-processing">—</strong><small>Recorded ANPR jobs; not gate response time</small></div>
+            <div><span>Unreadable captures</span><strong id="insight-no-plate">—</strong><small id="insight-no-plate-meta">—</small></div>
+            <div><span>Housekeeping</span><strong id="health-maintenance">—</strong><small id="health-maintenance-meta">—</small></div>
+            <div><span>Failed services</span><strong id="health-failures">—</strong><small id="health-failures-meta">—</small></div>
           </div>
-          <div class="insight-grid">
-            <div class="insight">
-              <div class="insight-title">Disk free</div>
-              <div id="health-disk-free" class="insight-value">--</div>
-              <div id="health-disk-meta" class="insight-sub">--</div>
-            </div>
-            <div class="insight">
-              <div class="insight-title">CPU temp</div>
-              <div id="health-temp" class="insight-value">--</div>
-              <div id="health-temp-meta" class="insight-sub">--</div>
-            </div>
-            <div class="insight">
-              <div class="insight-title">Maintenance</div>
-              <div id="health-maintenance" class="insight-value">--</div>
-              <div id="health-maintenance-meta" class="insight-sub">--</div>
-            </div>
-            <div class="insight">
-              <div class="insight-title">Failed units</div>
-              <div id="health-failures" class="insight-value">--</div>
-              <div id="health-failures-meta" class="insight-sub">--</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-head">
-            <h2>Plate word cloud</h2>
-            <div class="chart-label">Most seen plates in this window.</div>
-          </div>
-          <div class="cloud-grid">
-            <div>
-              <h3>Recognised</h3>
-              <div id="cloud-recognised" class="word-cloud"></div>
-            </div>
-            <div>
-              <h3>Unmatched</h3>
-              <div id="cloud-unmatched" class="word-cloud"></div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-head">
-            <h2>Activity</h2>
-            <div id="chart-label" class="chart-label">Loading…</div>
-          </div>
-          <canvas id="stats-chart" height="220"></canvas>
-        </section>
+        </details>
       </section>
 
       <section id="tab-logs" class="tab-panel" role="tabpanel" aria-hidden="true">

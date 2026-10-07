@@ -1,7 +1,7 @@
 """Plates must be displayed as entered in admin, resolved at render time from
 the current allowlist — never as the recorded/observed value.
 
-Regression for: a plate registered as "S3BPN" showed as "538PN" everywhere,
+Regression for: a plate registered as "SB12XYZ" showed as "5812XY2" everywhere,
 because recognition matches on an OCR-confusable-folded key (S->5, B->8) and
 the UI trusted that stored key instead of resolving back to the admin entry.
 """
@@ -20,40 +20,40 @@ def _set_allowlist(tmp_path, entries):
 
 
 def test_folded_key_resolves_to_registered_plate(tmp_path):
-    _set_allowlist(tmp_path, [{"owner": "Seb", "plates": ["S3BPN"]}])
+    _set_allowlist(tmp_path, [{"owner": "Example owner", "plates": ["SB12XYZ"]}])
     # Whatever variant got stored, display is always the admin entry.
-    assert app._display_plate("538PN") == "S3BPN"
-    assert app._display_plate("S3BPN") == "S3BPN"
+    assert app._display_plate("5812XY2") == "SB12XYZ"
+    assert app._display_plate("SB12XYZ") == "SB12XYZ"
 
 
 def test_unknown_plate_passes_through(tmp_path):
-    _set_allowlist(tmp_path, [{"owner": "Seb", "plates": ["S3BPN"]}])
+    _set_allowlist(tmp_path, [{"owner": "Example owner", "plates": ["SB12XYZ"]}])
     assert app._display_plate("XY99ZZZ") == "XY99ZZZ"  # not on the allowlist
     assert app._display_plate("") == ""
 
 
 def test_display_follows_admin_edits(tmp_path):
-    _set_allowlist(tmp_path, [{"owner": "Seb", "plates": ["S3BPN"]}])
-    assert app._display_plate("538PN") == "S3BPN"
+    _set_allowlist(tmp_path, [{"owner": "Example owner", "plates": ["SB12XYZ"]}])
+    assert app._display_plate("5812XY2") == "SB12XYZ"
     # Owner re-enters the plate with a different (still-folding) form; display
     # tracks the current admin value, not the historical record.
-    _set_allowlist(tmp_path, [{"owner": "Seb", "plates": ["S3BPN "]}])
-    assert app._display_plate("538PN") == "S3BPN"
+    _set_allowlist(tmp_path, [{"owner": "Example owner", "plates": ["SB12XYZ "]}])
+    assert app._display_plate("5812XY2") == "SB12XYZ"
 
 
 def test_query_events_renders_registered_plate(tmp_path):
-    _set_allowlist(tmp_path, [{"owner": "Seb", "plates": ["S3BPN"]}])
+    _set_allowlist(tmp_path, [{"owner": "Example owner", "plates": ["SB12XYZ"]}])
     # An event recorded with the folded key (as recognition stores it)...
     insert_event(
         app.EVENTS_DB_PATH,
-        plate="538PN",
-        owner="Seb",
+        plate="5812XY2",
+        owner="Example owner",
         allowed=True,
         kind="recognised",
-        observed_plate="538PN",
+        observed_plate="5812XY2",
     )
     events = app._query_events(kinds=["recognised"], limit=1)
     assert events, "expected the inserted event back"
     # ...is rendered as the registered plate, with the raw read still available.
-    assert events[0]["plate"] == "S3BPN"
-    assert events[0]["observed_plate"] == "538PN"
+    assert events[0]["plate"] == "SB12XYZ"
+    assert events[0]["observed_plate"] == "5812XY2"

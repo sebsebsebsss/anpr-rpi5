@@ -1,0 +1,221 @@
+---
+- name: Validate the dedicated DuckDNS challenge alias
+  assert:
+    that:
+      - "gate_https_challenge_alias is match('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.duckdns\\.org$')"
+    fail_msg: "Automatic HTTPS needs GATE_HTTPS_CHALLENGE_ALIAS=<dedicated-name>.duckdns.org and its permanent DNS CNAME."
+
+- name: Check for local DuckDNS credentials
+  stat:
+    path: "{{ gate_https_dns_env_path }}"
+  delegate_to: localhost
+  become: false
+  register: gate_https_dns_local
+  no_log: true
+
+- name: Check for previously installed DuckDNS credentials
+  stat:
+    path: /etc/gate-anpr/acme-dns.env
+  register: gate_https_dns_remote
+  no_log: true
+
+- name: Require supplied credentials before installing or issuing certificates
+  assert:
+    that:
+      - gate_https_dns_local.stat.exists or gate_https_dns_remote.stat.exists
+    fail_msg: "Add DuckDNS_Token=<token> to the gitignored files/gate_https_dns.env before enabling automatic HTTPS."
+
+- name: Validate supplied local credentials before downloads or replacing Pi credentials
+  command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ playbook_dir }}/files/gate_https_acme.py"
+      - --check-credentials
+      - "{{ gate_https_dns_env_path }}"
+  delegate_to: localhost
+  become: false
+  when: gate_https_dns_local.stat.exists
+  changed_when: false
+  no_log: true
+
+- name: Install ACME runtime dependencies
+  apt:
+    name:
+      - ca-certificates
+      - curl
+      - openssl
+      - tar
+    state: present
+
+- name: Create root-owned ACME program directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/gate-anpr-acme
+    - /usr/local/lib/gate-anpr
+    - /var/cache/gate-anpr
+
+- name: Create private ACME configuration and state directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /etc/gate-anpr
+    - /var/lib/gate-anpr
+    - /var/lib/gate-anpr/acme
+
+- name: Download the pinned acme.sh release
+  get_url:
+    url: "https://github.com/acmesh-official/acme.sh/archive/{{ gate_https_acme_commit }}.tar.gz"
+    dest: "/var/cache/gate-anpr/acme-{{ gate_https_acme_commit }}.tar.gz"
+    checksum: "sha256:{{ gate_https_acme_archive_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Check the currently installed ACME revision marker
+  stat:
+    path: /opt/gate-anpr-acme/.revision
+  register: gate_https_acme_revision_file
+
+- name: Read the currently installed ACME revision
+  slurp:
+    src: /opt/gate-anpr-acme/.revision
+  register: gate_https_acme_installed_revision
+  when: gate_https_acme_revision_file.stat.exists
+
+- name: Extract the pinned acme.sh program and provider hooks
+  unarchive:
+    src: "/var/cache/gate-anpr/acme-{{ gate_https_acme_commit }}.tar.gz"
+    dest: /opt/gate-anpr-acme
+    remote_src: true
+    owner: root
+    group: root
+    extra_opts:
+      - --strip-components=1
+  when: >-
+    not gate_https_acme_revision_file.stat.exists or
+    (gate_https_acme_installed_revision.content | b64decode | trim) != gate_https_acme_commit
+
+- name: Record the installed ACME revision
+  copy:
+    dest: /opt/gate-anpr-acme/.revision
+    content: "{{ gate_https_acme_commit }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install root-owned certificate helpers
+  copy:
+    src: "files/{{ item }}"
+    dest: "/usr/local/lib/gate-anpr/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - gate_https_validate.py
+    - gate_https_activate.py
+    - gate_https_acme.py
+
+- name: Install supplied DuckDNS credentials privately
+  copy:
+    src: "{{ gate_https_dns_env_path }}"
+    dest: /etc/gate-anpr/acme-dns.env
+    owner: root
+    group: root
+    mode: "0600"
+  when: gate_https_dns_local.stat.exists
+  no_log: true
+
+- name: Ensure existing DuckDNS credentials remain private
+  file:
+    path: /etc/gate-anpr/acme-dns.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Validate reused Pi credentials before issuance
+  command:
+    argv:
+      - /usr/bin/python3
+      - /usr/local/lib/gate-anpr/gate_https_acme.py
+      - --check-credentials
+      - /etc/gate-anpr/acme-dns.env
+  when: not gate_https_dns_local.stat.exists
+  changed_when: false
+  no_log: true
+
+- name: Install automatic certificate configuration
+  copy:
+    dest: /etc/gate-anpr/acme.json
+    content: "{{ {'domain': gate_https_domain, 'challenge_alias': gate_https_challenge_alias, 'credentials_file': '/etc/gate-anpr/acme-dns.env', 'acme_home': '/var/lib/gate-anpr/acme', 'acme_script': '/opt/gate-anpr-acme/acme.sh', 'destination': '/etc/gate-anpr/tls'} | to_nice_json }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Install the automatic certificate service
+  copy:
+    dest: /etc/systemd/system/gate_https_acme.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Issue or renew the gate HTTPS certificate
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      User=root
+      UMask=0077
+      Environment=ACME_PACKAGED=1
+      WorkingDirectory=/var/lib/gate-anpr/acme
+      ExecStart=/usr/bin/python3 /usr/local/lib/gate-anpr/gate_https_acme.py --config /etc/gate-anpr/acme.json
+      TimeoutStartSec=45min
+      Nice=10
+  register: gate_https_acme_unit
+
+- name: Install the daily automatic certificate timer
+  copy:
+    dest: /etc/systemd/system/gate_https_acme.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Daily gate HTTPS renewal check
+
+      [Timer]
+      OnCalendar=daily
+      RandomizedDelaySec=1h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+  register: gate_https_acme_timer_unit
+
+- name: Reload automatic certificate units
+  systemd:
+    daemon_reload: true
+  when: gate_https_acme_unit.changed or gate_https_acme_timer_unit.changed
+
+- name: Issue or refresh the managed certificate before HTTPS validation
+  systemd:
+    name: gate_https_acme.service
+    state: started
+
+- name: Enable the daily renewal check after successful issuance
+  systemd:
+    name: gate_https_acme.timer
+    enabled: true
+    state: started

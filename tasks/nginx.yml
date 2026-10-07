@@ -1,0 +1,42 @@
+---
+- name: Install nginx configuration validator
+  copy:
+    src: files/gate_nginx_install.py
+    dest: /usr/local/bin/gate_nginx_install.py
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create temporary nginx candidate
+  tempfile:
+    state: file
+    prefix: gate-nginx-
+  register: gate_nginx_candidate
+  changed_when: false
+
+- name: Validate and install nginx candidate
+  block:
+    - name: Render nginx candidate
+      template:
+        src: "{{ playbook_dir }}/files/nginx/gate-anpr.conf"
+        dest: "{{ gate_nginx_candidate.path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+
+    - name: Install nginx configuration with rollback on validation failure
+      command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/bin/gate_nginx_install.py
+          - "{{ gate_nginx_candidate.path }}"
+      register: gate_nginx_install
+      changed_when: "gate_nginx_install.stdout | trim == 'changed'"
+      notify: reload nginx
+  always:
+    - name: Remove temporary nginx candidate
+      file:
+        path: "{{ gate_nginx_candidate.path }}"
+        state: absent
+      changed_when: false

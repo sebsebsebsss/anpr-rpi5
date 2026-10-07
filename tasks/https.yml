@@ -1,0 +1,41 @@
+---
+- name: Validate HTTPS domain and certificate path configuration
+  assert:
+    that:
+      - "gate_https_domain | length == 0 or (gate_https_domain | length <= 253 and gate_https_domain is match('^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$'))"
+      - "not (gate_https_enabled | bool) or gate_https_domain | length > 0"
+      - "gate_https_cert_path is match('^/[A-Za-z0-9_./-]+$')"
+      - "gate_https_key_path is match('^/[A-Za-z0-9_./-]+$')"
+      - gate_https_min_valid_seconds | int >= 0
+    fail_msg: "HTTPS requires a valid DNS hostname and absolute certificate/key paths. HTTP remains available by IP and local hostname."
+
+- name: Check for an existing automatic certificate timer
+  stat:
+    path: /etc/systemd/system/gate_https_acme.timer
+  register: gate_https_acme_timer
+  when: not (gate_https_enabled | bool and gate_https_acme_enabled | bool)
+
+- name: Stop automatic renewal when HTTPS or ACME is disabled
+  systemd:
+    name: gate_https_acme.timer
+    enabled: false
+    state: stopped
+  when:
+    - not (gate_https_enabled | bool and gate_https_acme_enabled | bool)
+    - gate_https_acme_timer.stat.exists
+
+- name: Prepare and issue the managed certificate when explicitly enabled
+  import_tasks: https_acme.yml
+  when: gate_https_enabled | bool and gate_https_acme_enabled | bool
+
+- name: Verify trusted certificate, hostname, expiry and private key before enabling HTTPS
+  script:
+    cmd: >-
+      {{ playbook_dir }}/files/gate_https_validate.py
+      --domain {{ gate_https_domain | quote }}
+      --certificate {{ gate_https_cert_path | quote }}
+      --key {{ gate_https_key_path | quote }}
+      --min-valid-seconds {{ gate_https_min_valid_seconds | int }}
+    executable: /usr/bin/python3
+  changed_when: false
+  when: gate_https_enabled | bool
